@@ -2,6 +2,7 @@ import csv
 import re
 import io
 import json
+import hashlib
 import logging
 import redis
 from django.conf import settings
@@ -11,7 +12,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.permissions import AllowAny
-from .models import Campaign, Contact, CallLog, SingleCall, SingleCallLog
+from .models import Campaign, Contact, CallLog, SingleCall, SingleCallLog, ProcessedWebhookEvent
 from .serializers import (
     CampaignSerializer, ContactSerializer, CallLogSerializer,
     SingleCallSerializer, SingleCallLogSerializer,
@@ -32,8 +33,31 @@ DIAL_STATUS_MAP = {
 
 def _is_valid_phone(phone: str) -> bool:
     """Basic phone validation: must be digits (with optional +, -, parens, spaces) and 3-15 digits."""
-    cleaned = re.sub(r'[\s\-\(\)\+]', '', phone)
+    cleaned = _normalize_phone(phone)
     return cleaned.isdigit() and 3 <= len(cleaned) <= 15
+
+
+def _normalize_phone(phone: str) -> str:
+    """Normalize phone to digits-only form for consistent dedupe and dialing."""
+    return re.sub(r"\D", "", phone or "")
+
+
+def _event_idempotency_key(data: dict) -> str:
+    """Build a deterministic event fingerprint to avoid duplicate processing."""
+    key_payload = {
+        "event": data.get("Event", ""),
+        "single_call_id": data.get("SingleCallId", ""),
+        "contact_id": data.get("ContactId", ""),
+        "campaign_id": data.get("CampaignId", ""),
+        "channel": data.get("Channel", ""),
+        "digit": data.get("Digit", ""),
+        "dial_status": data.get("DialStatus", ""),
+        "cause": data.get("Cause", ""),
+        "cause_txt": data.get("CauseTxt", ""),
+        "duration": data.get("Duration", ""),
+    }
+    stable = json.dumps(key_payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(stable.encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -53,17 +77,30 @@ class CampaignViewSet(viewsets.ModelViewSet):
         reader = csv.reader(io.StringIO(file.read().decode("utf-8")))
         contacts = []
         skipped = 0
+        duplicates = 0
+        existing = set(campaign.contacts.values_list("phone", flat=True))
         for row in reader:
             if not row or not row[0].strip():
                 continue
-            phone = row[0].strip()
+            phone = _normalize_phone(row[0].strip())
             if _is_valid_phone(phone):
+                if phone in existing:
+                    duplicates += 1
+                    continue
                 contacts.append(Contact(campaign=campaign, phone=phone))
+                existing.add(phone)
             else:
                 skipped += 1
                 logger.warning(f"Skipping invalid phone number: {phone}")
         Contact.objects.bulk_create(contacts)
-        return Response({"status": "Contacts uploaded", "count": len(contacts), "skipped": skipped})
+        return Response(
+            {
+                "status": "Contacts uploaded",
+                "count": len(contacts),
+                "skipped": skipped,
+                "duplicates": duplicates,
+            }
+        )
 
     def create(self, request, *args, **kwargs):
         name = request.data.get('name')
@@ -161,6 +198,19 @@ class SingleCallViewSet(viewsets.ModelViewSet):
     queryset = SingleCall.objects.all().order_by("-created_at")
     serializer_class = SingleCallSerializer
     parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    def create(self, request, *args, **kwargs):
+        phone = _normalize_phone(request.data.get("phone", ""))
+        if not _is_valid_phone(phone):
+            return Response({"error": "Invalid phone number"}, status=status.HTTP_400_BAD_REQUEST)
+
+        mutable_data = request.data.copy()
+        mutable_data["phone"] = phone
+        serializer = self.get_serializer(data=mutable_data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+        headers = self.get_success_headers(serializer.data)
+        return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 
     @action(detail=True, methods=["post"])
     def dial(self, request, pk=None):
@@ -271,6 +321,14 @@ class CallEventWebhook(APIView):
         event_type = data.get("Event")
         contact_id = data.get("ContactId")
         single_call_id = data.get("SingleCallId")
+
+        # Idempotency guard for known contact/single-call events
+        if event_type and (contact_id or single_call_id):
+            event_key = _event_idempotency_key(data)
+            _, created = ProcessedWebhookEvent.objects.get_or_create(event_key=event_key)
+            if not created:
+                logger.info("Webhook: duplicate event ignored")
+                return Response({"status": "received"})
 
         # --- Single call event ---
         if single_call_id:
