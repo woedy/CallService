@@ -72,6 +72,7 @@ services:
       - ASTERISK_PASSWORD=django_secret
       - WEBHOOK_SECRET=dev-secret-not-for-production
       - DEBUG=True
+      - TTS_ENABLED=True
     networks:
       - callnet
 
@@ -96,6 +97,9 @@ services:
       - DB_HOST=db
       - CELERY_BROKER_URL=redis://redis:6379/0
       - REDIS_URL=redis://redis:6379/0
+      - WEBHOOK_SECRET=dev-secret-not-for-production
+      - DEBUG=True
+      - TTS_ENABLED=True
     networks:
       - callnet
 
