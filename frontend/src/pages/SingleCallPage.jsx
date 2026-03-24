@@ -35,17 +35,42 @@ function logIcon(message) {
     return LOG_ICONS.default;
 }
 
+function FileUploadField({ label, onChange }) {
+    return (
+        <div>
+            <label className="block text-sm font-medium text-gray-700 text-xs uppercase tracking-wider">
+                {label} <span className="text-gray-400 font-normal lowercase">(optional)</span>
+            </label>
+            <input
+                type="file"
+                accept=".wav,.gsm,.mp3,.ulaw,.alaw"
+                onChange={e => onChange(e.target.files?.[0] || null)}
+                className="mt-1 block w-full text-xs text-gray-500 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-xs file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100"
+            />
+        </div>
+    );
+}
+
 export default function SingleCallPage() {
+    const [mode, setMode] = useState('audio_only');
     const [phone, setPhone] = useState('');
     const [callerId, setCallerId] = useState('');
+    const [recipientName, setRecipientName] = useState('');
     const [note, setNote] = useState('');
+    const [expectedDigits, setExpectedDigits] = useState(4);
     const [audioFile, setAudioFile] = useState(null);
     const [audioFileReprompt, setAudioFileReprompt] = useState(null);
     const [audioFileTimeout, setAudioFileTimeout] = useState(null);
     const [audioFileGoodbye, setAudioFileGoodbye] = useState(null);
+    const [audioFileValidate, setAudioFileValidate] = useState(null);
     const [audioFilePress1, setAudioFilePress1] = useState(null);
     const [audioFilePress2, setAudioFilePress2] = useState(null);
     const [audioFileOnhold, setAudioFileOnhold] = useState(null);
+    const [templateCategory, setTemplateCategory] = useState('');
+    const [templateCategories, setTemplateCategories] = useState([]);
+    const [ttsScript, setTtsScript] = useState('');
+    const [ttsIntroFile, setTtsIntroFile] = useState(null);
+    const [ttsOutroFile, setTtsOutroFile] = useState(null);
     const [activeCall, setActiveCall] = useState(null);   // current call object
     const [logs, setLogs] = useState([]);
     const [history, setHistory] = useState([]);
@@ -70,7 +95,33 @@ export default function SingleCallPage() {
 
     useEffect(() => {
         fetchHistory();
+        api.get('/template-categories/?page_size=100')
+            .then(res => setTemplateCategories(res.data.results || []))
+            .catch(() => {});
     }, [fetchHistory]);
+
+    useEffect(() => {
+        if (mode === 'audio_only') {
+            setTemplateCategory('');
+            setTtsScript('');
+            setTtsIntroFile(null);
+            setTtsOutroFile(null);
+            return;
+        }
+        if (mode === 'tts_template') {
+            setTtsScript('');
+            setAudioFile(null);
+            setAudioFilePress2(null);
+            setAudioFileOnhold(null);
+            return;
+        }
+        if (mode === 'tts_script') {
+            setTemplateCategory('');
+            setAudioFile(null);
+            setAudioFilePress2(null);
+            setAudioFileOnhold(null);
+        }
+    }, [mode]);
 
     const connectWebSocket = useCallback((callId) => {
         if (socketRef.current) socketRef.current.close();
@@ -82,8 +133,13 @@ export default function SingleCallPage() {
             const data = JSON.parse(e.data);
             setLogs(prev => [...prev, data]);
             // Update active call status from WS
-            if (data.status) {
-                setActiveCall(prev => prev ? { ...prev, status: data.status } : prev);
+            if (data.status || data.dtmf_responses !== undefined || data.duration_seconds !== undefined) {
+                setActiveCall(prev => prev ? {
+                    ...prev,
+                    status: data.status ?? prev.status,
+                    dtmf_responses: data.dtmf_responses ?? prev.dtmf_responses,
+                    duration_seconds: data.duration_seconds ?? prev.duration_seconds,
+                } : prev);
             }
             // Refresh history when call ends
             if (['completed', 'failed', 'busy', 'no_answer'].includes(data.status)) {
@@ -103,16 +159,24 @@ export default function SingleCallPage() {
         try {
             // Create the call record
             const formData = new FormData();
+            formData.append('mode', mode);
             formData.append('phone', phone);
             if (callerId) formData.append('caller_id', callerId);
+            if (recipientName) formData.append('recipient_name', recipientName);
             if (note) formData.append('note', note);
-            if (audioFile) formData.append('audio_file', audioFile);
+            formData.append('expected_digits', String(expectedDigits));
+            if (mode === 'tts_template' && templateCategory) formData.append('template_category', templateCategory);
+            if (mode === 'tts_script' && ttsScript) formData.append('tts_script', ttsScript);
+            if (mode !== 'audio_only' && ttsIntroFile) formData.append('tts_intro_file', ttsIntroFile);
+            if (mode !== 'audio_only' && ttsOutroFile) formData.append('tts_outro_file', ttsOutroFile);
+            if (mode === 'audio_only' && audioFile) formData.append('audio_file', audioFile);
             if (audioFileReprompt) formData.append('audio_file_reprompt', audioFileReprompt);
             if (audioFileTimeout) formData.append('audio_file_timeout', audioFileTimeout);
             if (audioFileGoodbye) formData.append('audio_file_goodbye', audioFileGoodbye);
+            if (audioFileValidate) formData.append('audio_file_validate', audioFileValidate);
             if (audioFilePress1) formData.append('audio_file_press1', audioFilePress1);
-            if (audioFilePress2) formData.append('audio_file_press2', audioFilePress2);
-            if (audioFileOnhold) formData.append('audio_file_onhold', audioFileOnhold);
+            if (mode === 'audio_only' && audioFilePress2) formData.append('audio_file_press2', audioFilePress2);
+            if (mode === 'audio_only' && audioFileOnhold) formData.append('audio_file_onhold', audioFileOnhold);
 
             const res = await api.post('/single-calls/', formData, {
                 headers: { 'Content-Type': 'multipart/form-data' },
@@ -175,8 +239,13 @@ export default function SingleCallPage() {
         setActiveCall(call);
         setLogs([]);
         setPhone(call.phone);
+        setMode(call.mode || 'audio_only');
         setCallerId(call.caller_id || '');
+        setRecipientName(call.recipient_name || '');
         setNote(call.note || '');
+        setExpectedDigits(call.expected_digits || 4);
+        setTemplateCategory(call.template_category || '');
+        setTtsScript(call.tts_script || '');
         try {
             const res = await api.get(`/single-calls/${call.id}/logs/`);
             // Convert stored logs to display format
@@ -203,6 +272,11 @@ export default function SingleCallPage() {
                 {/* Dial form */}
                 <div className="bg-white shadow sm:rounded-lg px-4 py-5 sm:p-6">
                     <h2 className="text-lg font-medium text-gray-900 mb-4">Place a Call</h2>
+                    <div className="mb-4 flex flex-wrap gap-2">
+                        <button type="button" onClick={() => setMode('audio_only')} className={mode === 'audio_only' ? 'btn-primary' : 'btn-secondary'}>1) Audio Only</button>
+                        <button type="button" onClick={() => setMode('tts_template')} className={mode === 'tts_template' ? 'btn-primary' : 'btn-secondary'}>2) TTS + Template</button>
+                        <button type="button" onClick={() => setMode('tts_script')} className={mode === 'tts_script' ? 'btn-primary' : 'btn-secondary'}>3) TTS + Custom Script</button>
+                    </div>
                     {error && <p className="text-sm text-red-600 mb-3">{error}</p>}
                     <form onSubmit={handleDial} className="space-y-4">
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -228,6 +302,16 @@ export default function SingleCallPage() {
                                 />
                             </div>
                             <div>
+                                <label className="block text-sm font-medium text-gray-700">Recipient Name (optional)</label>
+                                <input
+                                    type="text"
+                                    value={recipientName}
+                                    onChange={e => setRecipientName(e.target.value)}
+                                    placeholder="e.g. Cynthia Morgan"
+                                    className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm px-3 py-2 text-sm focus:ring-indigo-500 focus:border-indigo-500"
+                                />
+                            </div>
+                            <div>
                                 <label className="block text-sm font-medium text-gray-700">Note (optional)</label>
                                 <input
                                     type="text"
@@ -237,88 +321,70 @@ export default function SingleCallPage() {
                                     className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm px-3 py-2 text-sm focus:ring-indigo-500 focus:border-indigo-500"
                                 />
                             </div>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700">Expected Digits</label>
+                                <input
+                                    type="number"
+                                    min="1"
+                                    max="10"
+                                    value={expectedDigits}
+                                    onChange={e => setExpectedDigits(Number(e.target.value))}
+                                    className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm px-3 py-2 text-sm focus:ring-indigo-500 focus:border-indigo-500"
+                                />
+                            </div>
+                            {mode === 'tts_template' && (
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700">Template Category</label>
+                                <select
+                                    value={templateCategory}
+                                    onChange={e => setTemplateCategory(e.target.value)}
+                                    className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm px-3 py-2 text-sm focus:ring-indigo-500 focus:border-indigo-500"
+                                >
+                                    <option value="">No template category</option>
+                                    {templateCategories.map(cat => (
+                                        <option key={cat.id} value={cat.id}>{cat.name}</option>
+                                    ))}
+                                </select>
+                            </div>
+                            )}
+                            {mode === 'tts_script' && (
+                                <div className="sm:col-span-2">
+                                    <label className="block text-sm font-medium text-gray-700">Custom Greeting Script</label>
+                                    <textarea
+                                        value={ttsScript}
+                                        onChange={e => setTtsScript(e.target.value)}
+                                        placeholder="Type full greeting script..."
+                                        className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm px-3 py-2 text-sm focus:ring-indigo-500 focus:border-indigo-500"
+                                        rows={3}
+                                    />
+                                </div>
+                            )}
                         </div>
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 text-xs uppercase tracking-wider">
-                                    Greeting Audio <span className="text-gray-400 font-normal lowercase">(optional)</span>
-                                </label>
-                                <input
-                                    type="file"
-                                    accept=".wav,.gsm,.mp3,.ulaw,.alaw"
-                                    onChange={e => setAudioFile(e.target.files[0])}
-                                    className="mt-1 block w-full text-xs text-gray-500 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-xs file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100"
-                                />
+                        {mode === 'audio_only' && (
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                <FileUploadField label="Greeting Audio" onChange={setAudioFile} />
+                                <FileUploadField label="Reprompt Audio" onChange={setAudioFileReprompt} />
+                                <FileUploadField label="Timeout Audio" onChange={setAudioFileTimeout} />
+                                <FileUploadField label="Goodbye Audio" onChange={setAudioFileGoodbye} />
+                                <FileUploadField label="Validate Code Audio" onChange={setAudioFileValidate} />
+                                <FileUploadField label="Press 1 Audio" onChange={setAudioFilePress1} />
+                                <FileUploadField label="Press 2 Audio" onChange={setAudioFilePress2} />
+                                <FileUploadField label="OnHold Audio" onChange={setAudioFileOnhold} />
                             </div>
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 text-xs uppercase tracking-wider">
-                                    Reprompt Audio <span className="text-gray-400 font-normal lowercase">(optional)</span>
-                                </label>
-                                <input
-                                    type="file"
-                                    accept=".wav,.gsm,.mp3,.ulaw,.alaw"
-                                    onChange={e => setAudioFileReprompt(e.target.files[0])}
-                                    className="mt-1 block w-full text-xs text-gray-500 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-xs file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100"
-                                />
+                        )}
+                        {(mode === 'tts_template' || mode === 'tts_script') && (
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                <FileUploadField label="TTS Intro Clip" onChange={setTtsIntroFile} />
+                                <FileUploadField label="TTS Outro Clip" onChange={setTtsOutroFile} />
+                                <FileUploadField label="Reprompt Audio" onChange={setAudioFileReprompt} />
+                                <FileUploadField label="Timeout Audio" onChange={setAudioFileTimeout} />
+                                <FileUploadField label="Goodbye Audio" onChange={setAudioFileGoodbye} />
+                                <FileUploadField label="Validate Code Audio" onChange={setAudioFileValidate} />
+                                <FileUploadField label="Press 1 Audio" onChange={setAudioFilePress1} />
                             </div>
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 text-xs uppercase tracking-wider">
-                                    Timeout Audio <span className="text-gray-400 font-normal lowercase">(optional)</span>
-                                </label>
-                                <input
-                                    type="file"
-                                    accept=".wav,.gsm,.mp3,.ulaw,.alaw"
-                                    onChange={e => setAudioFileTimeout(e.target.files[0])}
-                                    className="mt-1 block w-full text-xs text-gray-500 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-xs file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100"
-                                />
-                            </div>
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 text-xs uppercase tracking-wider">
-                                    Goodbye Audio <span className="text-gray-400 font-normal lowercase">(optional)</span>
-                                </label>
-                                <input
-                                    type="file"
-                                    accept=".wav,.gsm,.mp3,.ulaw,.alaw"
-                                    onChange={e => setAudioFileGoodbye(e.target.files[0])}
-                                    className="mt-1 block w-full text-xs text-gray-500 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-xs file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100"
-                                />
-                            </div>
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 text-xs uppercase tracking-wider">
-                                    Press 1 Audio <span className="text-gray-400 font-normal lowercase">(optional)</span>
-                                </label>
-                                <input
-                                    type="file"
-                                    accept=".wav,.gsm,.mp3,.ulaw,.alaw"
-                                    onChange={e => setAudioFilePress1(e.target.files[0])}
-                                    className="mt-1 block w-full text-xs text-gray-500 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-xs file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100"
-                                />
-                            </div>
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 text-xs uppercase tracking-wider">
-                                    Press 2 Audio <span className="text-gray-400 font-normal lowercase">(optional)</span>
-                                </label>
-                                <input
-                                    type="file"
-                                    accept=".wav,.gsm,.mp3,.ulaw,.alaw"
-                                    onChange={e => setAudioFilePress2(e.target.files[0])}
-                                    className="mt-1 block w-full text-xs text-gray-500 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-xs file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100"
-                                />
-                            </div>
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 text-xs uppercase tracking-wider">
-                                    OnHold Audio <span className="text-gray-400 font-normal lowercase">(optional)</span>
-                                </label>
-                                <input
-                                    type="file"
-                                    accept=".wav,.gsm,.mp3,.ulaw,.alaw"
-                                    onChange={e => setAudioFileOnhold(e.target.files[0])}
-                                    className="mt-1 block w-full text-xs text-gray-500 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-xs file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100"
-                                />
-                            </div>
-                        </div>
+                        )}
                         <p className="mt-2 text-[10px] text-gray-400 italic">
-                            Leave blank to use default system voices for those events.
+                            Show only the options needed for the selected call mode. Leave blank to use system defaults.
                         </p>
                         <div className="flex gap-3">
                             <button type="submit" disabled={dialing || isActive} className="btn-primary">

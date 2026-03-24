@@ -3,6 +3,7 @@ import { BrowserRouter as Router, Routes, Route, Link, NavLink } from 'react-rou
 import Dashboard from './pages/Dashboard';
 import CampaignDetails from './pages/CampaignDetails';
 import SingleCallPage from './pages/SingleCallPage';
+import TemplateManagerPage from './pages/TemplateManagerPage';
 
 function App() {
   return (
@@ -30,6 +31,14 @@ function App() {
                 >
                   Single Call
                 </NavLink>
+                <NavLink
+                  to="/templates"
+                  className={({ isActive }) =>
+                    `text-sm font-medium ${isActive ? 'text-indigo-600' : 'text-gray-500 hover:text-gray-900'}`
+                  }
+                >
+                  Templates
+                </NavLink>
               </div>
             </div>
           </div>
@@ -40,6 +49,7 @@ function App() {
             <Route path="/" element={<Dashboard />} />
             <Route path="/campaigns/:id" element={<CampaignDetails />} />
             <Route path="/calls" element={<SingleCallPage />} />
+            <Route path="/templates" element={<TemplateManagerPage />} />
           </Routes>
         </main>
       </div>

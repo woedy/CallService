@@ -1,11 +1,26 @@
 import os
-import time
 import logging
+import random
+import hashlib
+import subprocess
+from pathlib import Path
 from celery import shared_task
 from channels.layers import get_channel_layer
 from asgiref.sync import async_to_sync
+from django.conf import settings
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_CUSTOM_AUDIO = {
+    "greeting": "custom/Greeting Audio",
+    "reprompt": "custom/Reprompt Audio",
+    "timeout": "custom/Timeout Audio",
+    "goodbye": "custom/Goodbye Audio",
+    "validate": "custom/Validate Code Audio",
+    "press1": "custom/Press 1 Audio",
+    "press2": "custom/Press 2 Audio",
+    "onhold": "custom/OnHold Audio",
+}
 
 
 def _asterisk_sound(file_field, default_sound: str) -> str:
@@ -21,6 +36,39 @@ def _asterisk_sound(file_field, default_sound: str) -> str:
     # Example: campaign_audio/greeting.wav -> custom/campaign_audio/greeting
     name_no_ext = os.path.splitext(name)[0]
     return f"custom/{name_no_ext}"
+
+
+def _synthesize_tts_sound(text: str, prefix: str) -> str | None:
+    """Generate or reuse a WAV TTS file and return Asterisk sound name."""
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return None
+
+    out_dir = Path(settings.MEDIA_ROOT) / "tts_prompts"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    digest = hashlib.sha1(cleaned.encode("utf-8")).hexdigest()[:16]
+    filename = f"{prefix}_{digest}.wav"
+    out_path = out_dir / filename
+
+    if not out_path.exists():
+        cmd = [
+            "espeak",
+            "-s",
+            str(getattr(settings, "TTS_SPEECH_RATE", 145)),
+            "-v",
+            getattr(settings, "TTS_VOICE", "en"),
+            "-w",
+            str(out_path),
+            cleaned,
+        ]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
+        except Exception as exc:
+            logger.warning(f"TTS generation failed: {exc}")
+            return None
+
+    return f"custom/tts_prompts/{filename[:-4]}"
 
 
 def _push_ws_update(data: dict):
@@ -100,7 +148,6 @@ def place_call_task(contact_id):
 
     import redis
     import json
-    from django.conf import settings
     
     r = redis.from_url(settings.REDIS_URL, decode_responses=True)
     payload = {
@@ -115,13 +162,13 @@ def place_call_task(contact_id):
         "variables": {
             "CAMPAIGN_ID": str(campaign.id),
             "CONTACT_ID": str(contact.id),
-            "AUDIO_GREETING": _asterisk_sound(campaign.audio_file, "custom/Greeting Audio"),
-            "AUDIO_REPROMPT": _asterisk_sound(campaign.audio_file_reprompt, "custom/Reprompt Audio"),
-            "AUDIO_TIMEOUT": _asterisk_sound(campaign.audio_file_timeout, "custom/Timeout Audio"),
-            "AUDIO_GOODBYE": _asterisk_sound(campaign.audio_file_goodbye, "custom/Goodbye Audio"),
-            "AUDIO_PRESS1": _asterisk_sound(campaign.audio_file_press1, "custom/Press 1 Audio"),
-            "AUDIO_PRESS2": _asterisk_sound(campaign.audio_file_press2, "pls-wait-connect-call"),
-            "AUDIO_ONHOLD": _asterisk_sound(campaign.audio_file_onhold, "custom/OnHold Audio"),
+            "AUDIO_GREETING": _asterisk_sound(campaign.audio_file, DEFAULT_CUSTOM_AUDIO["greeting"]),
+            "AUDIO_REPROMPT": _asterisk_sound(campaign.audio_file_reprompt, DEFAULT_CUSTOM_AUDIO["reprompt"]),
+            "AUDIO_TIMEOUT": _asterisk_sound(campaign.audio_file_timeout, DEFAULT_CUSTOM_AUDIO["timeout"]),
+            "AUDIO_GOODBYE": _asterisk_sound(campaign.audio_file_goodbye, DEFAULT_CUSTOM_AUDIO["goodbye"]),
+            "AUDIO_PRESS1": _asterisk_sound(campaign.audio_file_press1, DEFAULT_CUSTOM_AUDIO["press1"]),
+            "AUDIO_PRESS2": _asterisk_sound(campaign.audio_file_press2, DEFAULT_CUSTOM_AUDIO["press2"]),
+            "AUDIO_ONHOLD": _asterisk_sound(campaign.audio_file_onhold, DEFAULT_CUSTOM_AUDIO["onhold"]),
         }
     }
     r.publish("ami_commands", json.dumps(payload))
@@ -154,7 +201,7 @@ def check_campaign_complete(campaign_id):
 
 @shared_task
 def place_single_call_task(call_id):
-    from .models import SingleCall, SingleCallLog
+    from .models import SingleCall, AudioTemplate
 
     try:
         call = SingleCall.objects.get(id=call_id)
@@ -171,19 +218,71 @@ def place_single_call_task(call_id):
     else:
         channel = f"PJSIP/my-trunk/sip:{call.phone}@my-trunk"
 
-    # Audio is optional for single calls
+    mode = call.mode or "audio_only"
+    # Audio/template selection:
+    # - audio_only: use uploaded greeting or random category template greeting audio.
+    # - tts_template: use random category template prompt_text + optional intro/outro clips.
+    # - tts_script: use free-form script + optional intro/outro clips.
+    greeting_file = call.audio_file
+    selected_template = None
     if call.audio_file:
-        audio_name = os.path.splitext(os.path.basename(call.audio_file.name))[0]
         context = "single-call-audio"
+    elif call.template_category_id:
+        candidates = list(
+            AudioTemplate.objects.filter(
+                category_id=call.template_category_id,
+                is_active=True,
+            )
+        )
+        if candidates:
+            chosen = random.choice(candidates)
+            call.selected_template = chosen
+            call.save(update_fields=["selected_template", "updated_at"])
+            greeting_file = chosen.greeting_audio
+            selected_template = chosen
+            context = "single-call-audio"
+            _log_and_push(call, f"Using template: {chosen.name}")
+        else:
+            context = "single-call-agent"
     else:
-        audio_name = ""
         context = "single-call-agent"
 
     cid_name = call.caller_id if call.caller_id else "CallService"
+    expected_digits = max(1, min(int(call.expected_digits or 4), 10))
+
+    tts_enabled = getattr(settings, "TTS_ENABLED", True)
+    greeting_mode = "single"
+    dynamic_intro_sound = None
+    dynamic_greeting_sound = None
+    dynamic_outro_sound = None
+    dynamic_press1_sound = None
+    if tts_enabled and mode in {"tts_template", "tts_script"}:
+        base_prompt = ""
+        if mode == "tts_template" and selected_template and selected_template.prompt_text:
+            base_prompt = selected_template.prompt_text
+            dynamic_intro_sound = _asterisk_sound(selected_template.tts_intro_audio, "")
+            dynamic_outro_sound = _asterisk_sound(selected_template.tts_outro_audio, "")
+        elif mode == "tts_script":
+            base_prompt = (call.tts_script or "").strip()
+            dynamic_intro_sound = _asterisk_sound(call.tts_intro_file, "")
+            dynamic_outro_sound = _asterisk_sound(call.tts_outro_file, "")
+
+        if base_prompt:
+            greeting_text = (
+                f"Hello {call.recipient_name or 'there'}. "
+                f"This is a quick question and answer from {cid_name}. "
+                f"{base_prompt}. "
+                f"Press 1 to answer or press 2 to talk to an agent."
+            )
+            dynamic_greeting_sound = _synthesize_tts_sound(greeting_text, "greeting")
+            if dynamic_greeting_sound:
+                greeting_mode = "split"
+
+        press1_text = f"Enter your {expected_digits} digit answer and press the pound key when done."
+        dynamic_press1_sound = _synthesize_tts_sound(press1_text, "press1")
 
     import redis
     import json
-    from django.conf import settings
     
     r = redis.from_url(settings.REDIS_URL, decode_responses=True)
     payload = {
@@ -197,13 +296,19 @@ def place_single_call_task(call_id):
         "account": f"single_{call.id}",
         "variables": {
             "SINGLE_CALL_ID": str(call.id),
-            "AUDIO_GREETING": _asterisk_sound(call.audio_file, "custom/Greeting Audio"),
-            "AUDIO_REPROMPT": _asterisk_sound(call.audio_file_reprompt, "custom/Reprompt Audio"),
-            "AUDIO_TIMEOUT": _asterisk_sound(call.audio_file_timeout, "custom/Timeout Audio"),
-            "AUDIO_GOODBYE": _asterisk_sound(call.audio_file_goodbye, "custom/Goodbye Audio"),
-            "AUDIO_PRESS1": _asterisk_sound(call.audio_file_press1, "custom/Press 1 Audio"),
-            "AUDIO_PRESS2": _asterisk_sound(call.audio_file_press2, "pls-wait-connect-call"),
-            "AUDIO_ONHOLD": _asterisk_sound(call.audio_file_onhold, "custom/OnHold Audio"),
+            "GREETING_MODE": greeting_mode,
+            "AUDIO_GREETING": _asterisk_sound(greeting_file, DEFAULT_CUSTOM_AUDIO["greeting"]),
+            "AUDIO_GREETING_INTRO": dynamic_intro_sound or "",
+            "AUDIO_GREETING_TTS": dynamic_greeting_sound or "",
+            "AUDIO_GREETING_OUTRO": dynamic_outro_sound or "",
+            "AUDIO_REPROMPT": _asterisk_sound(call.audio_file_reprompt, DEFAULT_CUSTOM_AUDIO["reprompt"]),
+            "AUDIO_TIMEOUT": _asterisk_sound(call.audio_file_timeout, DEFAULT_CUSTOM_AUDIO["timeout"]),
+            "AUDIO_GOODBYE": _asterisk_sound(call.audio_file_goodbye, DEFAULT_CUSTOM_AUDIO["goodbye"]),
+            "AUDIO_VALIDATE": _asterisk_sound(call.audio_file_validate, DEFAULT_CUSTOM_AUDIO["validate"]),
+            "AUDIO_PRESS1": dynamic_press1_sound or _asterisk_sound(call.audio_file_press1, DEFAULT_CUSTOM_AUDIO["press1"]),
+            "AUDIO_PRESS2": _asterisk_sound(call.audio_file_press2, DEFAULT_CUSTOM_AUDIO["press2"]),
+            "AUDIO_ONHOLD": _asterisk_sound(call.audio_file_onhold, DEFAULT_CUSTOM_AUDIO["onhold"]),
+            "EXPECTED_DIGITS": str(expected_digits),
         }
     }
     r.publish("ami_commands", json.dumps(payload))
@@ -212,13 +317,14 @@ def place_single_call_task(call_id):
 def _log_and_push(call, message: str, raw_event: dict = None):
     """Create a SingleCallLog entry and push it over WebSocket."""
     from .models import SingleCallLog
-    import datetime
 
     log = SingleCallLog.objects.create(call=call, message=message, raw_event=raw_event)
     _push_call_log(call.id, {
         "type": "call_log",
         "call_id": call.id,
         "status": call.status,
+        "dtmf_responses": call.dtmf_responses,
+        "duration_seconds": call.duration_seconds,
         "message": message,
         "timestamp": log.timestamp.isoformat(),
         "raw_event": raw_event,
