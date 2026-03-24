@@ -43,6 +43,7 @@ export default function SingleCallPage() {
     const [audioFileReprompt, setAudioFileReprompt] = useState(null);
     const [audioFileTimeout, setAudioFileTimeout] = useState(null);
     const [audioFileGoodbye, setAudioFileGoodbye] = useState(null);
+    const [audioFileValidate, setAudioFileValidate] = useState(null);
     const [audioFilePress1, setAudioFilePress1] = useState(null);
     const [audioFilePress2, setAudioFilePress2] = useState(null);
     const [audioFileOnhold, setAudioFileOnhold] = useState(null);
@@ -82,8 +83,13 @@ export default function SingleCallPage() {
             const data = JSON.parse(e.data);
             setLogs(prev => [...prev, data]);
             // Update active call status from WS
-            if (data.status) {
-                setActiveCall(prev => prev ? { ...prev, status: data.status } : prev);
+            if (data.status || data.dtmf_responses !== undefined || data.duration_seconds !== undefined) {
+                setActiveCall(prev => prev ? {
+                    ...prev,
+                    status: data.status ?? prev.status,
+                    dtmf_responses: data.dtmf_responses ?? prev.dtmf_responses,
+                    duration_seconds: data.duration_seconds ?? prev.duration_seconds,
+                } : prev);
             }
             // Refresh history when call ends
             if (['completed', 'failed', 'busy', 'no_answer'].includes(data.status)) {
@@ -110,6 +116,7 @@ export default function SingleCallPage() {
             if (audioFileReprompt) formData.append('audio_file_reprompt', audioFileReprompt);
             if (audioFileTimeout) formData.append('audio_file_timeout', audioFileTimeout);
             if (audioFileGoodbye) formData.append('audio_file_goodbye', audioFileGoodbye);
+            if (audioFileValidate) formData.append('audio_file_validate', audioFileValidate);
             if (audioFilePress1) formData.append('audio_file_press1', audioFilePress1);
             if (audioFilePress2) formData.append('audio_file_press2', audioFilePress2);
             if (audioFileOnhold) formData.append('audio_file_onhold', audioFileOnhold);
@@ -280,6 +287,17 @@ export default function SingleCallPage() {
                                     type="file"
                                     accept=".wav,.gsm,.mp3,.ulaw,.alaw"
                                     onChange={e => setAudioFileGoodbye(e.target.files[0])}
+                                    className="mt-1 block w-full text-xs text-gray-500 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-xs file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100"
+                                />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 text-xs uppercase tracking-wider">
+                                    Validate Code Audio <span className="text-gray-400 font-normal lowercase">(optional)</span>
+                                </label>
+                                <input
+                                    type="file"
+                                    accept=".wav,.gsm,.mp3,.ulaw,.alaw"
+                                    onChange={e => setAudioFileValidate(e.target.files[0])}
                                     className="mt-1 block w-full text-xs text-gray-500 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-xs file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100"
                                 />
                             </div>
