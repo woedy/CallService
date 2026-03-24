@@ -1,0 +1,136 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: callservice
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+    volumes:
+      - ./data/db:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - callnet
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d callservice"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    networks:
+      - callnet
+
+  asterisk:
+    build: ./asterisk
+    ports:
+      - "5061:5060/udp"
+      - "5061:5060/tcp"
+      - "5038:5038"
+      - "10000-10050:10000-10050/udp"
+    volumes:
+      - asterisk_spool:/var/spool/asterisk/outgoing
+      - ./asterisk/sounds:/var/lib/asterisk/sounds/custom
+    networks:
+      - callnet
+
+  backend:
+    build: ./backend
+    command: >
+      sh -c "python manage.py migrate --noinput &&
+             python manage.py collectstatic --noinput &&
+             daphne -b 0.0.0.0 -p 8000 config.asgi:application"
+    volumes:
+      - ./backend:/app
+      - asterisk_spool:/var/spool/asterisk/outgoing
+      - ./asterisk/sounds:/app/media
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      asterisk:
+        condition: service_started
+    environment:
+      - POSTGRES_DB=callservice
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=password
+      - DB_HOST=db
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - REDIS_URL=redis://redis:6379/0
+      - ASTERISK_HOST=asterisk
+      - ASTERISK_PORT=5038
+      - ASTERISK_USER=django
+      - ASTERISK_PASSWORD=django_secret
+      - WEBHOOK_SECRET=dev-secret-not-for-production
+      - DEBUG=True
+    networks:
+      - callnet
+
+  celery:
+    build: ./backend
+    command: celery -A config worker -l info --concurrency=4
+    volumes:
+      - ./backend:/app
+      - asterisk_spool:/var/spool/asterisk/outgoing
+      - ./asterisk/sounds:/app/media
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      backend:
+        condition: service_started
+    environment:
+      - POSTGRES_DB=callservice
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=password
+      - DB_HOST=db
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - REDIS_URL=redis://redis:6379/0
+    networks:
+      - callnet
+
+  ami_listener:
+    build: ./backend/ami_listener
+    depends_on:
+      - asterisk
+      - backend
+    environment:
+      - ASTERISK_HOST=asterisk
+      - ASTERISK_PORT=5038
+      - ASTERISK_USER=django
+      - ASTERISK_PASSWORD=django_secret
+      - WEBHOOK_URL=http://backend:8000/api/call-events/
+      - WEBHOOK_SECRET=dev-secret-not-for-production
+      - REDIS_URL=redis://redis:6379/0
+    restart: on-failure
+    networks:
+      - callnet
+
+  frontend:
+    build: ./frontend
+    command: sh -c "npm install && npm run dev -- --host"
+    volumes:
+      - ./frontend:/app
+      - frontend_node_modules:/app/node_modules
+    ports:
+      - "5173:5173"
+    networks:
+      - callnet
+
+volumes:
+  asterisk_spool:
+  frontend_node_modules:
+
+networks:
+  callnet:
+    driver: bridge

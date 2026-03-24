@@ -1,0 +1,126 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-callservice}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: always
+    networks:
+      - callnet
+
+  redis:
+    image: redis:7
+    restart: always
+    networks:
+      - callnet
+
+  asterisk:
+    build: ./asterisk
+    ports:
+      - "5060:5060/udp"
+      - "5060:5060/tcp"
+      - "10000-10050:10000-10050/udp"
+    volumes:
+      - asterisk_spool:/var/spool/asterisk/outgoing
+      - asterisk_sounds:/var/lib/asterisk/sounds/custom
+    restart: always
+    networks:
+      - callnet
+
+  backend:
+    build: ./backend
+    command: >
+      sh -c "python manage.py migrate --noinput &&
+             python manage.py collectstatic --noinput &&
+             daphne -b 0.0.0.0 -p 8000 config.asgi:application"
+    volumes:
+      - asterisk_spool:/var/spool/asterisk/outgoing
+      - asterisk_sounds:/var/lib/asterisk/sounds/custom
+      - media_volume:/app/media
+    expose:
+      - "8000"
+    depends_on:
+      - db
+      - redis
+      - asterisk
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-callservice}
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - DB_HOST=db
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - REDIS_URL=redis://redis:6379/0
+      - ASTERISK_HOST=asterisk
+      - ASTERISK_PORT=5038
+      - ASTERISK_USER=${ASTERISK_USER:-django}
+      - ASTERISK_PASSWORD=${ASTERISK_PASSWORD:-django_secret}
+      - SECRET_KEY=${SECRET_KEY:?SECRET_KEY is required}
+      - DEBUG=False
+      - ALLOWED_HOSTS=${ALLOWED_HOSTS:-*}
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET:?WEBHOOK_SECRET is required}
+      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-}
+    restart: always
+    networks:
+      - callnet
+
+  celery:
+    build: ./backend
+    command: celery -A config worker -l info --concurrency=4
+    volumes:
+      - asterisk_spool:/var/spool/asterisk/outgoing
+      - media_volume:/app/media
+    depends_on:
+      - db
+      - redis
+      - backend
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-callservice}
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - DB_HOST=db
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - REDIS_URL=redis://redis:6379/0
+      - SECRET_KEY=${SECRET_KEY}
+    restart: always
+    networks:
+      - callnet
+
+  ami_listener:
+    build: ./backend/ami_listener
+    depends_on:
+      - asterisk
+      - backend
+    environment:
+      - ASTERISK_HOST=asterisk
+      - ASTERISK_PORT=5038
+      - ASTERISK_USER=${ASTERISK_USER:-django}
+      - ASTERISK_PASSWORD=${ASTERISK_PASSWORD:-django_secret}
+      - WEBHOOK_URL=http://backend:8000/api/call-events/
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET:?WEBHOOK_SECRET is required}
+      - REDIS_URL=redis://redis:6379/0
+    restart: always
+    networks:
+      - callnet
+
+  frontend:
+    build: ./frontend
+    expose:
+      - "5173"
+    restart: always
+    networks:
+      - callnet
+
+volumes:
+  postgres_data:
+  asterisk_spool:
+  asterisk_sounds:
+  media_volume:
+
+networks:
+  callnet:
+    driver: bridge

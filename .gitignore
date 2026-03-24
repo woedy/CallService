@@ -1,0 +1,82 @@
+# --- OS Files ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# --- Environment & Secrets ---
+.env
+.env.local
+.env.*.local
+*.env
+! .env.example
+
+# --- Python / Django ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Django specific
+backend/db.sqlite3
+backend/media/
+backend/staticfiles/
+backend/celerybeat-schedule
+backend/.pytest_cache/
+
+# --- Node / Frontend ---
+frontend/node_modules/
+frontend/dist/
+frontend/dist-ssr/
+frontend/.next/
+frontend/out/
+frontend/build/
+frontend/*.log
+frontend/npm-debug.log*
+frontend/yarn-debug.log*
+frontend/yarn-error.log*
+frontend/.pnp*
+frontend/.pnp.js
+
+# --- Docker & Data ---
+data/db/*
+!data/db/.gitkeep
+asterisk/spool/*
+!asterisk/spool/.gitkeep
+
+# --- Project Specific ---
+*.log
+*.zip
+*.tar.gz
+*.wav
+*.gsm
+*.mp3
+!asterisk/sounds/custom/Greeting Audio.wav
+!asterisk/sounds/custom/Goodbye Audio.wav
+!asterisk/sounds/custom/Reprompt Audio.wav
+!asterisk/sounds/custom/Timeout Audio.wav
+!asterisk/sounds/custom/Press 1 Audio.wav
+!asterisk/sounds/custom/OnHold Audio.wav

@@ -1,0 +1,12 @@
+from django.urls import path, include
+from rest_framework.routers import DefaultRouter
+from .views import CampaignViewSet, SingleCallViewSet, CallEventWebhook
+
+router = DefaultRouter()
+router.register(r'campaigns', CampaignViewSet)
+router.register(r'single-calls', SingleCallViewSet)
+
+urlpatterns = [
+    path('', include(router.urls)),
+    path('call-events/', CallEventWebhook.as_view(), name='call-events'),
+]
