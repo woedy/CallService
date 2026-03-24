@@ -5,6 +5,7 @@ COPY pjsip.conf /etc/asterisk/pjsip.conf
 COPY extensions.conf /etc/asterisk/extensions.conf
 COPY manager.conf /etc/asterisk/manager.conf
 COPY rtp.conf /etc/asterisk/rtp.conf
+COPY modules.conf /etc/asterisk/modules.conf
 
 # Install core sounds (English, ulaw) so built-in prompts like hello-world work
 USER root
