@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Campaign, Contact, CallLog, SingleCall, SingleCallLog
+from .models import Campaign, Contact, CallLog, SingleCall, SingleCallLog, ProcessedWebhookEvent
 
 
 @admin.register(Campaign)
@@ -33,3 +33,9 @@ class SingleCallAdmin(admin.ModelAdmin):
 class SingleCallLogAdmin(admin.ModelAdmin):
     list_display = ('call', 'message', 'timestamp')
     readonly_fields = ('raw_event',)
+
+
+@admin.register(ProcessedWebhookEvent)
+class ProcessedWebhookEventAdmin(admin.ModelAdmin):
+    list_display = ('event_key', 'created_at')
+    search_fields = ('event_key',)
