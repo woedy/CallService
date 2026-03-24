@@ -1,5 +1,4 @@
 import os
-import time
 import logging
 from celery import shared_task
 from channels.layers import get_channel_layer
@@ -154,7 +153,7 @@ def check_campaign_complete(campaign_id):
 
 @shared_task
 def place_single_call_task(call_id):
-    from .models import SingleCall, SingleCallLog
+    from .models import SingleCall
 
     try:
         call = SingleCall.objects.get(id=call_id)
@@ -173,10 +172,8 @@ def place_single_call_task(call_id):
 
     # Audio is optional for single calls
     if call.audio_file:
-        audio_name = os.path.splitext(os.path.basename(call.audio_file.name))[0]
         context = "single-call-audio"
     else:
-        audio_name = ""
         context = "single-call-agent"
 
     cid_name = call.caller_id if call.caller_id else "CallService"
@@ -212,7 +209,6 @@ def place_single_call_task(call_id):
 def _log_and_push(call, message: str, raw_event: dict = None):
     """Create a SingleCallLog entry and push it over WebSocket."""
     from .models import SingleCallLog
-    import datetime
 
     log = SingleCallLog.objects.create(call=call, message=message, raw_event=raw_event)
     _push_call_log(call.id, {
