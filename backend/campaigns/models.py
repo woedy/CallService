@@ -22,6 +22,7 @@ class SingleCall(models.Model):
     audio_file_reprompt = models.FileField(upload_to='single_call_audio/', null=True, blank=True)
     audio_file_timeout = models.FileField(upload_to='single_call_audio/', null=True, blank=True)
     audio_file_goodbye = models.FileField(upload_to='single_call_audio/', null=True, blank=True)
+    audio_file_validate = models.FileField(upload_to='single_call_audio/', null=True, blank=True)
     audio_file_press1 = models.FileField(upload_to='single_call_audio/', null=True, blank=True)
     audio_file_press2 = models.FileField(upload_to='single_call_audio/', null=True, blank=True)
     audio_file_onhold = models.FileField(upload_to='single_call_audio/', null=True, blank=True)
@@ -106,3 +107,15 @@ class CallLog(models.Model):
 
     def __str__(self):
         return f"Log for {self.contact.phone} at {self.timestamp}"
+
+
+class ProcessedWebhookEvent(models.Model):
+    """Stores event fingerprints to make webhook handling idempotent."""
+    event_key = models.CharField(max_length=64, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return self.event_key
