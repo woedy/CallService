@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Campaign, Contact, CallLog, SingleCall, SingleCallLog
+from .models import Campaign, Contact, CallLog, SingleCall, SingleCallLog, QuestionCategory, AudioTemplate
 
 
 class CampaignSerializer(serializers.ModelSerializer):
@@ -34,3 +34,61 @@ class SingleCallSerializer(serializers.ModelSerializer):
         model = SingleCall
         fields = '__all__'
         read_only_fields = ('status', 'dtmf_responses', 'duration_seconds', 'created_at', 'updated_at')
+
+
+class QuestionCategorySerializer(serializers.ModelSerializer):
+    template_count = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = QuestionCategory
+        fields = "__all__"
+
+
+class AudioTemplateSerializer(serializers.ModelSerializer):
+    greeting_audio_url = serializers.SerializerMethodField()
+    tts_intro_audio_url = serializers.SerializerMethodField()
+    tts_outro_audio_url = serializers.SerializerMethodField()
+    category_name = serializers.CharField(source="category.name", read_only=True)
+
+    class Meta:
+        model = AudioTemplate
+        fields = (
+            "id",
+            "category",
+            "category_name",
+            "name",
+            "prompt_text",
+            "tts_intro_audio",
+            "tts_outro_audio",
+            "greeting_audio",
+            "greeting_audio_url",
+            "tts_intro_audio_url",
+            "tts_outro_audio_url",
+            "is_active",
+            "created_at",
+            "updated_at",
+        )
+
+    def get_greeting_audio_url(self, obj):
+        request = self.context.get("request")
+        if not obj.greeting_audio:
+            return None
+        if request:
+            return request.build_absolute_uri(obj.greeting_audio.url)
+        return obj.greeting_audio.url
+
+    def get_tts_intro_audio_url(self, obj):
+        if not obj.tts_intro_audio:
+            return None
+        request = self.context.get("request")
+        if request:
+            return request.build_absolute_uri(obj.tts_intro_audio.url)
+        return obj.tts_intro_audio.url
+
+    def get_tts_outro_audio_url(self, obj):
+        if not obj.tts_outro_audio:
+            return None
+        request = self.context.get("request")
+        if request:
+            return request.build_absolute_uri(obj.tts_outro_audio.url)
+        return obj.tts_outro_audio.url
