@@ -18,10 +18,27 @@ class SingleCall(models.Model):
     caller_id = models.CharField(max_length=50, blank=True, default='')
     channel = models.CharField(max_length=255, blank=True, default='')
     note = models.CharField(max_length=255, blank=True)
+    recipient_name = models.CharField(max_length=120, blank=True, default='')
+    expected_digits = models.PositiveSmallIntegerField(default=4)
+    template_category = models.ForeignKey(
+        "QuestionCategory",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="single_calls",
+    )
+    selected_template = models.ForeignKey(
+        "AudioTemplate",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="single_calls",
+    )
     audio_file = models.FileField(upload_to='single_call_audio/', null=True, blank=True)
     audio_file_reprompt = models.FileField(upload_to='single_call_audio/', null=True, blank=True)
     audio_file_timeout = models.FileField(upload_to='single_call_audio/', null=True, blank=True)
     audio_file_goodbye = models.FileField(upload_to='single_call_audio/', null=True, blank=True)
+    audio_file_validate = models.FileField(upload_to='single_call_audio/', null=True, blank=True)
     audio_file_press1 = models.FileField(upload_to='single_call_audio/', null=True, blank=True)
     audio_file_press2 = models.FileField(upload_to='single_call_audio/', null=True, blank=True)
     audio_file_onhold = models.FileField(upload_to='single_call_audio/', null=True, blank=True)
@@ -106,3 +123,48 @@ class CallLog(models.Model):
 
     def __str__(self):
         return f"Log for {self.contact.phone} at {self.timestamp}"
+
+
+class QuestionCategory(models.Model):
+    name = models.CharField(max_length=100, unique=True)
+    description = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+
+
+class AudioTemplate(models.Model):
+    category = models.ForeignKey(QuestionCategory, related_name="templates", on_delete=models.CASCADE)
+    name = models.CharField(max_length=150)
+    prompt_text = models.TextField(
+        blank=True,
+        help_text="Optional question text used for dynamic TTS greetings.",
+    )
+    greeting_audio = models.FileField(upload_to="question_templates/")
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        unique_together = ("category", "name")
+
+    def __str__(self):
+        return f"{self.category.name}: {self.name}"
+
+
+class ProcessedWebhookEvent(models.Model):
+    """Stores event fingerprints to make webhook handling idempotent."""
+    event_key = models.CharField(max_length=64, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return self.event_key
