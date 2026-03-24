@@ -82,8 +82,13 @@ export default function SingleCallPage() {
             const data = JSON.parse(e.data);
             setLogs(prev => [...prev, data]);
             // Update active call status from WS
-            if (data.status) {
-                setActiveCall(prev => prev ? { ...prev, status: data.status } : prev);
+            if (data.status || data.dtmf_responses !== undefined || data.duration_seconds !== undefined) {
+                setActiveCall(prev => prev ? {
+                    ...prev,
+                    status: data.status ?? prev.status,
+                    dtmf_responses: data.dtmf_responses ?? prev.dtmf_responses,
+                    duration_seconds: data.duration_seconds ?? prev.duration_seconds,
+                } : prev);
             }
             // Refresh history when call ends
             if (['completed', 'failed', 'busy', 'no_answer'].includes(data.status)) {
