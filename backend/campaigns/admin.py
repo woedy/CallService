@@ -1,5 +1,14 @@
 from django.contrib import admin
-from .models import Campaign, Contact, CallLog, SingleCall, SingleCallLog
+from .models import (
+    Campaign,
+    Contact,
+    CallLog,
+    SingleCall,
+    SingleCallLog,
+    ProcessedWebhookEvent,
+    QuestionCategory,
+    AudioTemplate,
+)
 
 
 @admin.register(Campaign)
@@ -33,3 +42,23 @@ class SingleCallAdmin(admin.ModelAdmin):
 class SingleCallLogAdmin(admin.ModelAdmin):
     list_display = ('call', 'message', 'timestamp')
     readonly_fields = ('raw_event',)
+
+
+@admin.register(ProcessedWebhookEvent)
+class ProcessedWebhookEventAdmin(admin.ModelAdmin):
+    list_display = ('event_key', 'created_at')
+    search_fields = ('event_key',)
+
+
+@admin.register(QuestionCategory)
+class QuestionCategoryAdmin(admin.ModelAdmin):
+    list_display = ('name', 'is_active', 'created_at')
+    search_fields = ('name',)
+    list_filter = ('is_active',)
+
+
+@admin.register(AudioTemplate)
+class AudioTemplateAdmin(admin.ModelAdmin):
+    list_display = ('name', 'category', 'is_active', 'created_at')
+    list_filter = ('category', 'is_active')
+    search_fields = ('name',)

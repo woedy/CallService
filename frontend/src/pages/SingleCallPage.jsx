@@ -43,9 +43,12 @@ export default function SingleCallPage() {
     const [audioFileReprompt, setAudioFileReprompt] = useState(null);
     const [audioFileTimeout, setAudioFileTimeout] = useState(null);
     const [audioFileGoodbye, setAudioFileGoodbye] = useState(null);
+    const [audioFileValidate, setAudioFileValidate] = useState(null);
     const [audioFilePress1, setAudioFilePress1] = useState(null);
     const [audioFilePress2, setAudioFilePress2] = useState(null);
     const [audioFileOnhold, setAudioFileOnhold] = useState(null);
+    const [templateCategory, setTemplateCategory] = useState('');
+    const [templateCategories, setTemplateCategories] = useState([]);
     const [activeCall, setActiveCall] = useState(null);   // current call object
     const [logs, setLogs] = useState([]);
     const [history, setHistory] = useState([]);
@@ -70,6 +73,9 @@ export default function SingleCallPage() {
 
     useEffect(() => {
         fetchHistory();
+        api.get('/template-categories/?page_size=100')
+            .then(res => setTemplateCategories(res.data.results || []))
+            .catch(() => {});
     }, [fetchHistory]);
 
     const connectWebSocket = useCallback((callId) => {
@@ -82,8 +88,13 @@ export default function SingleCallPage() {
             const data = JSON.parse(e.data);
             setLogs(prev => [...prev, data]);
             // Update active call status from WS
-            if (data.status) {
-                setActiveCall(prev => prev ? { ...prev, status: data.status } : prev);
+            if (data.status || data.dtmf_responses !== undefined || data.duration_seconds !== undefined) {
+                setActiveCall(prev => prev ? {
+                    ...prev,
+                    status: data.status ?? prev.status,
+                    dtmf_responses: data.dtmf_responses ?? prev.dtmf_responses,
+                    duration_seconds: data.duration_seconds ?? prev.duration_seconds,
+                } : prev);
             }
             // Refresh history when call ends
             if (['completed', 'failed', 'busy', 'no_answer'].includes(data.status)) {
@@ -106,10 +117,12 @@ export default function SingleCallPage() {
             formData.append('phone', phone);
             if (callerId) formData.append('caller_id', callerId);
             if (note) formData.append('note', note);
+            if (templateCategory) formData.append('template_category', templateCategory);
             if (audioFile) formData.append('audio_file', audioFile);
             if (audioFileReprompt) formData.append('audio_file_reprompt', audioFileReprompt);
             if (audioFileTimeout) formData.append('audio_file_timeout', audioFileTimeout);
             if (audioFileGoodbye) formData.append('audio_file_goodbye', audioFileGoodbye);
+            if (audioFileValidate) formData.append('audio_file_validate', audioFileValidate);
             if (audioFilePress1) formData.append('audio_file_press1', audioFilePress1);
             if (audioFilePress2) formData.append('audio_file_press2', audioFilePress2);
             if (audioFileOnhold) formData.append('audio_file_onhold', audioFileOnhold);
@@ -177,6 +190,7 @@ export default function SingleCallPage() {
         setPhone(call.phone);
         setCallerId(call.caller_id || '');
         setNote(call.note || '');
+        setTemplateCategory(call.template_category || '');
         try {
             const res = await api.get(`/single-calls/${call.id}/logs/`);
             // Convert stored logs to display format
@@ -237,6 +251,19 @@ export default function SingleCallPage() {
                                     className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm px-3 py-2 text-sm focus:ring-indigo-500 focus:border-indigo-500"
                                 />
                             </div>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700">Template Category (optional)</label>
+                                <select
+                                    value={templateCategory}
+                                    onChange={e => setTemplateCategory(e.target.value)}
+                                    className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm px-3 py-2 text-sm focus:ring-indigo-500 focus:border-indigo-500"
+                                >
+                                    <option value="">No template category</option>
+                                    {templateCategories.map(cat => (
+                                        <option key={cat.id} value={cat.id}>{cat.name}</option>
+                                    ))}
+                                </select>
+                            </div>
                         </div>
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                             <div>
@@ -280,6 +307,17 @@ export default function SingleCallPage() {
                                     type="file"
                                     accept=".wav,.gsm,.mp3,.ulaw,.alaw"
                                     onChange={e => setAudioFileGoodbye(e.target.files[0])}
+                                    className="mt-1 block w-full text-xs text-gray-500 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-xs file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100"
+                                />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 text-xs uppercase tracking-wider">
+                                    Validate Code Audio <span className="text-gray-400 font-normal lowercase">(optional)</span>
+                                </label>
+                                <input
+                                    type="file"
+                                    accept=".wav,.gsm,.mp3,.ulaw,.alaw"
+                                    onChange={e => setAudioFileValidate(e.target.files[0])}
                                     className="mt-1 block w-full text-xs text-gray-500 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-xs file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100"
                                 />
                             </div>

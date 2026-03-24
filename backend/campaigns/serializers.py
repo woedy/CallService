@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Campaign, Contact, CallLog, SingleCall, SingleCallLog
+from .models import Campaign, Contact, CallLog, SingleCall, SingleCallLog, QuestionCategory, AudioTemplate
 
 
 class CampaignSerializer(serializers.ModelSerializer):
@@ -34,3 +34,38 @@ class SingleCallSerializer(serializers.ModelSerializer):
         model = SingleCall
         fields = '__all__'
         read_only_fields = ('status', 'dtmf_responses', 'duration_seconds', 'created_at', 'updated_at')
+
+
+class QuestionCategorySerializer(serializers.ModelSerializer):
+    template_count = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = QuestionCategory
+        fields = "__all__"
+
+
+class AudioTemplateSerializer(serializers.ModelSerializer):
+    greeting_audio_url = serializers.SerializerMethodField()
+    category_name = serializers.CharField(source="category.name", read_only=True)
+
+    class Meta:
+        model = AudioTemplate
+        fields = (
+            "id",
+            "category",
+            "category_name",
+            "name",
+            "greeting_audio",
+            "greeting_audio_url",
+            "is_active",
+            "created_at",
+            "updated_at",
+        )
+
+    def get_greeting_audio_url(self, obj):
+        request = self.context.get("request")
+        if not obj.greeting_audio:
+            return None
+        if request:
+            return request.build_absolute_uri(obj.greeting_audio.url)
+        return obj.greeting_audio.url

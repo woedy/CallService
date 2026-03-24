@@ -1,11 +1,22 @@
 import os
-import time
 import logging
+import random
 from celery import shared_task
 from channels.layers import get_channel_layer
 from asgiref.sync import async_to_sync
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_CUSTOM_AUDIO = {
+    "greeting": "custom/Greeting Audio",
+    "reprompt": "custom/Reprompt Audio",
+    "timeout": "custom/Timeout Audio",
+    "goodbye": "custom/Goodbye Audio",
+    "validate": "custom/Validate Code Audio",
+    "press1": "custom/Press 1 Audio",
+    "press2": "custom/Press 2 Audio",
+    "onhold": "custom/OnHold Audio",
+}
 
 
 def _asterisk_sound(file_field, default_sound: str) -> str:
@@ -115,13 +126,13 @@ def place_call_task(contact_id):
         "variables": {
             "CAMPAIGN_ID": str(campaign.id),
             "CONTACT_ID": str(contact.id),
-            "AUDIO_GREETING": _asterisk_sound(campaign.audio_file, "custom/Greeting Audio"),
-            "AUDIO_REPROMPT": _asterisk_sound(campaign.audio_file_reprompt, "custom/Reprompt Audio"),
-            "AUDIO_TIMEOUT": _asterisk_sound(campaign.audio_file_timeout, "custom/Timeout Audio"),
-            "AUDIO_GOODBYE": _asterisk_sound(campaign.audio_file_goodbye, "custom/Goodbye Audio"),
-            "AUDIO_PRESS1": _asterisk_sound(campaign.audio_file_press1, "custom/Press 1 Audio"),
-            "AUDIO_PRESS2": _asterisk_sound(campaign.audio_file_press2, "pls-wait-connect-call"),
-            "AUDIO_ONHOLD": _asterisk_sound(campaign.audio_file_onhold, "custom/OnHold Audio"),
+            "AUDIO_GREETING": _asterisk_sound(campaign.audio_file, DEFAULT_CUSTOM_AUDIO["greeting"]),
+            "AUDIO_REPROMPT": _asterisk_sound(campaign.audio_file_reprompt, DEFAULT_CUSTOM_AUDIO["reprompt"]),
+            "AUDIO_TIMEOUT": _asterisk_sound(campaign.audio_file_timeout, DEFAULT_CUSTOM_AUDIO["timeout"]),
+            "AUDIO_GOODBYE": _asterisk_sound(campaign.audio_file_goodbye, DEFAULT_CUSTOM_AUDIO["goodbye"]),
+            "AUDIO_PRESS1": _asterisk_sound(campaign.audio_file_press1, DEFAULT_CUSTOM_AUDIO["press1"]),
+            "AUDIO_PRESS2": _asterisk_sound(campaign.audio_file_press2, DEFAULT_CUSTOM_AUDIO["press2"]),
+            "AUDIO_ONHOLD": _asterisk_sound(campaign.audio_file_onhold, DEFAULT_CUSTOM_AUDIO["onhold"]),
         }
     }
     r.publish("ami_commands", json.dumps(payload))
@@ -154,7 +165,7 @@ def check_campaign_complete(campaign_id):
 
 @shared_task
 def place_single_call_task(call_id):
-    from .models import SingleCall, SingleCallLog
+    from .models import SingleCall, AudioTemplate
 
     try:
         call = SingleCall.objects.get(id=call_id)
@@ -171,12 +182,28 @@ def place_single_call_task(call_id):
     else:
         channel = f"PJSIP/my-trunk/sip:{call.phone}@my-trunk"
 
-    # Audio is optional for single calls
+    # Audio is optional for single calls. If a template category is provided
+    # and no explicit audio file is attached, pick a random active template.
+    greeting_file = call.audio_file
     if call.audio_file:
-        audio_name = os.path.splitext(os.path.basename(call.audio_file.name))[0]
         context = "single-call-audio"
+    elif call.template_category_id:
+        candidates = list(
+            AudioTemplate.objects.filter(
+                category_id=call.template_category_id,
+                is_active=True,
+            )
+        )
+        if candidates:
+            chosen = random.choice(candidates)
+            call.selected_template = chosen
+            call.save(update_fields=["selected_template", "updated_at"])
+            greeting_file = chosen.greeting_audio
+            context = "single-call-audio"
+            _log_and_push(call, f"Using template: {chosen.name}")
+        else:
+            context = "single-call-agent"
     else:
-        audio_name = ""
         context = "single-call-agent"
 
     cid_name = call.caller_id if call.caller_id else "CallService"
@@ -197,13 +224,14 @@ def place_single_call_task(call_id):
         "account": f"single_{call.id}",
         "variables": {
             "SINGLE_CALL_ID": str(call.id),
-            "AUDIO_GREETING": _asterisk_sound(call.audio_file, "custom/Greeting Audio"),
-            "AUDIO_REPROMPT": _asterisk_sound(call.audio_file_reprompt, "custom/Reprompt Audio"),
-            "AUDIO_TIMEOUT": _asterisk_sound(call.audio_file_timeout, "custom/Timeout Audio"),
-            "AUDIO_GOODBYE": _asterisk_sound(call.audio_file_goodbye, "custom/Goodbye Audio"),
-            "AUDIO_PRESS1": _asterisk_sound(call.audio_file_press1, "custom/Press 1 Audio"),
-            "AUDIO_PRESS2": _asterisk_sound(call.audio_file_press2, "pls-wait-connect-call"),
-            "AUDIO_ONHOLD": _asterisk_sound(call.audio_file_onhold, "custom/OnHold Audio"),
+            "AUDIO_GREETING": _asterisk_sound(greeting_file, DEFAULT_CUSTOM_AUDIO["greeting"]),
+            "AUDIO_REPROMPT": _asterisk_sound(call.audio_file_reprompt, DEFAULT_CUSTOM_AUDIO["reprompt"]),
+            "AUDIO_TIMEOUT": _asterisk_sound(call.audio_file_timeout, DEFAULT_CUSTOM_AUDIO["timeout"]),
+            "AUDIO_GOODBYE": _asterisk_sound(call.audio_file_goodbye, DEFAULT_CUSTOM_AUDIO["goodbye"]),
+            "AUDIO_VALIDATE": _asterisk_sound(call.audio_file_validate, DEFAULT_CUSTOM_AUDIO["validate"]),
+            "AUDIO_PRESS1": _asterisk_sound(call.audio_file_press1, DEFAULT_CUSTOM_AUDIO["press1"]),
+            "AUDIO_PRESS2": _asterisk_sound(call.audio_file_press2, DEFAULT_CUSTOM_AUDIO["press2"]),
+            "AUDIO_ONHOLD": _asterisk_sound(call.audio_file_onhold, DEFAULT_CUSTOM_AUDIO["onhold"]),
         }
     }
     r.publish("ami_commands", json.dumps(payload))
@@ -212,13 +240,14 @@ def place_single_call_task(call_id):
 def _log_and_push(call, message: str, raw_event: dict = None):
     """Create a SingleCallLog entry and push it over WebSocket."""
     from .models import SingleCallLog
-    import datetime
 
     log = SingleCallLog.objects.create(call=call, message=message, raw_event=raw_event)
     _push_call_log(call.id, {
         "type": "call_log",
         "call_id": call.id,
         "status": call.status,
+        "dtmf_responses": call.dtmf_responses,
+        "duration_seconds": call.duration_seconds,
         "message": message,
         "timestamp": log.timestamp.isoformat(),
         "raw_event": raw_event,
