@@ -64,6 +64,9 @@ services:
       - ALLOWED_HOSTS=${ALLOWED_HOSTS:-*}
       - WEBHOOK_SECRET=${WEBHOOK_SECRET:?WEBHOOK_SECRET is required}
       - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-}
+      - TTS_ENABLED=${TTS_ENABLED:-True}
+      - TTS_VOICE=${TTS_VOICE:-en}
+      - TTS_SPEECH_RATE=${TTS_SPEECH_RATE:-145}
     restart: always
     networks:
       - callnet
@@ -86,6 +89,10 @@ services:
       - CELERY_BROKER_URL=redis://redis:6379/0
       - REDIS_URL=redis://redis:6379/0
       - SECRET_KEY=${SECRET_KEY}
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET:?WEBHOOK_SECRET is required}
+      - TTS_ENABLED=${TTS_ENABLED:-True}
+      - TTS_VOICE=${TTS_VOICE:-en}
+      - TTS_SPEECH_RATE=${TTS_SPEECH_RATE:-145}
     restart: always
     networks:
       - callnet
