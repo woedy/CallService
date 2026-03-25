@@ -62,6 +62,8 @@ export default function SingleCallPage() {
     const [selectedCategory, setSelectedCategory] = useState('');
     const [templates, setTemplates] = useState([]);
     const [selectedTemplate, setSelectedTemplate] = useState('');
+    const [press1Templates, setPress1Templates] = useState([]);
+    const [selectedPress1Template, setSelectedPress1Template] = useState('');
     const [activeTab, setActiveTab] = useState('audio_only');
 
     const [activeCall, setActiveCall] = useState(null);   // current call object
@@ -108,20 +110,43 @@ export default function SingleCallPage() {
         }
     }, []);
 
+    const fetchPress1Templates = useCallback(async () => {
+        try {
+            // Use the new backend filter for category_type
+            const res = await api.get('/audio-templates/?category_type=press1&page_size=100');
+            setPress1Templates(res.data.results || []);
+        } catch {
+            console.error('Failed to load press1 templates');
+        }
+    }, []);
+
     useEffect(() => {
         fetchHistory();
     }, [fetchHistory]);
 
     useEffect(() => {
         fetchCategories(activeTab);
+        fetchPress1Templates();
         setSelectedCategory('');
         setTemplates([]);
         setSelectedTemplate('');
-    }, [activeTab, fetchCategories]);
+        setSelectedPress1Template('');
+    }, [activeTab, fetchCategories, fetchPress1Templates]);
 
     useEffect(() => {
         fetchTemplates(selectedCategory, activeTab);
     }, [selectedCategory, activeTab, fetchTemplates]);
+
+    // Auto-select Press 1 template matching expected_digits
+    useEffect(() => {
+        if (selectedTemplate && press1Templates.length > 0) {
+            const tpl = templates.find(t => String(t.id) === String(selectedTemplate));
+            if (tpl) {
+                const match = press1Templates.find(p => p.expected_digits === tpl.expected_digits);
+                if (match) setSelectedPress1Template(match.id);
+            }
+        }
+    }, [selectedTemplate, templates, press1Templates]);
 
     const connectWebSocket = useCallback((callId) => {
         if (socketRef.current) socketRef.current.close();
@@ -168,6 +193,7 @@ export default function SingleCallPage() {
             if (recipientName) formData.append('recipient_name', recipientName);
             if (note) formData.append('note', note);
             formData.append('selected_template', selectedTemplate);
+            if (selectedPress1Template) formData.append('press1_template', selectedPress1Template);
 
             const res = await api.post('/single-calls/', formData);
             const call = res.data;
@@ -339,7 +365,7 @@ export default function SingleCallPage() {
                                             className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm px-3 py-2 text-sm focus:ring-indigo-500 focus:border-indigo-500"
                                         >
                                             <option value="">Select a Category</option>
-                                            {templateCategories.map(cat => (
+                                            {templateCategories.filter(cat => cat.category_type === 'greeting').map(cat => (
                                                 <option key={cat.id} value={cat.id}>{cat.name}</option>
                                             ))}
                                         </select>
@@ -360,7 +386,29 @@ export default function SingleCallPage() {
                                                 </option>
                                             ))}
                                         </select>
+                                        {selectedTemplate && (
+                                            <p className="mt-1 text-[10px] text-indigo-500 font-bold uppercase">
+                                                Expected Digits: {templates.find(t => String(t.id) === String(selectedTemplate))?.expected_digits}
+                                            </p>
+                                        )}
                                     </div>
+                                    {activeTab === 'audio_only' && (
+                                        <div>
+                                            <label className="block text-xs font-semibold text-gray-600">Digit Prompt (Press 1)*</label>
+                                            <select
+                                                value={selectedPress1Template}
+                                                onChange={e => setSelectedPress1Template(e.target.value)}
+                                                className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm px-3 py-2 text-sm focus:ring-indigo-500 focus:border-indigo-500"
+                                            >
+                                                <option value="">System Default (TTS)</option>
+                                                {press1Templates.map(tpl => (
+                                                    <option key={tpl.id} value={tpl.id}>
+                                                        {tpl.name} ({tpl.expected_digits} Digits)
+                                                    </option>
+                                                ))}
+                                            </select>
+                                        </div>
+                                    )}
                                     <div>
                                         <label className="block text-xs font-semibold text-gray-600">Call Note</label>
                                         <input

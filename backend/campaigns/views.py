@@ -347,8 +347,11 @@ class QuestionCategoryViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         qs = QuestionCategory.objects.annotate(template_count=Count("templates")).order_by("name")
         mode = self.request.query_params.get("mode")
+        category_type = self.request.query_params.get("category_type")
         if mode:
             qs = qs.filter(mode=mode)
+        if category_type:
+            qs = qs.filter(category_type=category_type)
         return qs
 
 
@@ -360,10 +363,13 @@ class AudioTemplateViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         qs = AudioTemplate.objects.select_related("category").order_by("-created_at")
         category_id = self.request.query_params.get("category")
+        category_type = self.request.query_params.get("category_type")
         mode = self.request.query_params.get("mode")
         search = self.request.query_params.get("search")
         if category_id:
             qs = qs.filter(category_id=category_id)
+        if category_type:
+            qs = qs.filter(category__category_type=category_type)
         if mode:
             qs = qs.filter(mode=mode)
         if search:

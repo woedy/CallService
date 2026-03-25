@@ -46,6 +46,13 @@ class SingleCall(models.Model):
         on_delete=models.SET_NULL,
         related_name="single_calls",
     )
+    press1_template = models.ForeignKey(
+        "AudioTemplate",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="single_calls_as_press1",
+    )
     tts_script = models.TextField(blank=True, default="")
     press1_tts_script = models.TextField(blank=True, default="")
     audio_file = models.FileField(upload_to='single_call_audio/', null=True, blank=True)
@@ -152,9 +159,14 @@ class QuestionCategory(models.Model):
         ("audio_only", "Audio Only"),
         ("tts_script", "TTS + Custom Script"),
     ]
+    CATEGORY_TYPES = [
+        ("greeting", "Main Greeting"),
+        ("press1", "Press 1 Prompt (Digit Entry)"),
+    ]
 
     name = models.CharField(max_length=100, unique=True)
     mode = models.CharField(max_length=25, choices=MODE_CHOICES, default="audio_only")
+    category_type = models.CharField(max_length=20, choices=CATEGORY_TYPES, default="greeting")
     description = models.TextField(blank=True)
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)

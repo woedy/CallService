@@ -204,7 +204,7 @@ def place_single_call_task(call_id):
     from .models import SingleCall, AudioTemplate
 
     try:
-        call = SingleCall.objects.select_related("selected_template").get(id=call_id)
+        call = SingleCall.objects.select_related("selected_template", "press1_template").get(id=call_id)
     except SingleCall.DoesNotExist:
         return
 
@@ -250,15 +250,20 @@ def place_single_call_task(call_id):
         
         # Play the full script and hang up
         greeting_mode = "playback"
-        dynamic_greeting_sound = f"say:{final_script}"
+        dynamic_greeting_sound = _synthesize_tts_sound(final_script, "greeting")
         expected_digits = 0
         dynamic_intro_sound = None
         dynamic_outro_sound = None
-        
-        # Determine Press 1 instructions if we expect digits
-        if expected_digits:
+
+    # Determine Press 1 instructions if we expect digits
+    # This now runs for ALL modes (audio_only, etc.)
+    if expected_digits > 0:
+        # Check if we have a press1_template selected
+        if call.press1_template and call.press1_template.greeting_audio:
+            dynamic_press1_sound = _asterisk_sound(call.press1_template.greeting_audio, "")
+        else:
             press1_text = f"Enter your {expected_digits} digit answer and press the pound key when done."
-            dynamic_press1_sound = f"say:{press1_text}"
+            dynamic_press1_sound = _synthesize_tts_sound(press1_text, "press1")
 
     # Final variable assembly
     # Order of priority for constants: SingleCall override -> Global Default (Template fields removed as constants)

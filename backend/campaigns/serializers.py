@@ -41,7 +41,7 @@ class QuestionCategorySerializer(serializers.ModelSerializer):
 
     class Meta:
         model = QuestionCategory
-        fields = "__all__"
+        fields = ["id", "name", "mode", "category_type", "description", "is_active", "template_count", "created_at"]
 
 
 class AudioTemplateSerializer(serializers.ModelSerializer):

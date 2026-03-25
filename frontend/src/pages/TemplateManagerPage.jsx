@@ -14,15 +14,17 @@ export default function TemplateManagerPage() {
   
   // Template Form State
   const [tplName, setTplName] = useState('');
-  const [tplMode, setTplMode] = useState('audio_only');
   const [tplCategory, setTplCategory] = useState('');
-  const [tplPromptText, setTplPromptText] = useState('');
+  const [tplMode, setTplMode] = useState('audio_only');
   const [tplGreetingScript, setTplGreetingScript] = useState('');
   const [tplExpectedDigits, setTplExpectedDigits] = useState(4);
-  
-  // Audio Files State
   const [tplAudio, setTplAudio] = useState(null);
   const [tplActive, setTplActive] = useState(true);
+
+  // Category Form State
+  const [newCatName, setNewCatName] = useState('');
+  const [newCatDesc, setNewCatDesc] = useState('');
+  const [newCatType, setNewCatType] = useState('greeting');
 
   const fetchCategories = async (mode = activeTab) => {
     try {
@@ -52,26 +54,20 @@ export default function TemplateManagerPage() {
     setTplMode(activeTab);
   }, [activeTab]);
 
-  // Sync template mode when category is selected
-  useEffect(() => {
-    if (tplCategory) {
-      const cat = categories.find(c => String(c.id) === String(tplCategory));
-      if (cat) setTplMode(cat.mode);
-    }
-  }, [tplCategory, categories]);
-
   const handleCreateCategory = async (e) => {
     e.preventDefault();
     setError('');
     try {
       await api.post('/template-categories/', { 
-        name: catName, 
-        description: catDesc, 
-        mode: activeTab, // Always matches current tab
+        name: newCatName, 
+        description: newCatDesc, 
+        mode: activeTab,
+        category_type: newCatType,
         is_active: true 
       });
-      setCatName('');
-      setCatDesc('');
+      setNewCatName('');
+      setNewCatDesc('');
+      setNewCatType('greeting');
       await fetchCategories(activeTab);
     } catch {
       setError('Failed to create category');
@@ -82,7 +78,7 @@ export default function TemplateManagerPage() {
     if (!window.confirm('Delete this category?')) return;
     try {
       await api.delete(`/template-categories/${id}/`);
-      await fetchCategories();
+      await fetchCategories(activeTab);
     } catch {
       setError('Failed to delete category');
     }
@@ -170,16 +166,31 @@ export default function TemplateManagerPage() {
           <h3 className="text-md font-semibold text-gray-900 mb-3">Feature Categories</h3>
           <p className="text-xs text-gray-400 mb-4 italic">Organize templates by feature like "Single Call".</p>
           <form onSubmit={handleCreateCategory} className="space-y-3">
-            <input value={catName} onChange={(e) => setCatName(e.target.value)} placeholder={`New ${activeTab.replace('_',' ')} category name...`} required className="w-full border rounded px-3 py-2 text-sm" />
-            <textarea value={catDesc} onChange={(e) => setCatDesc(e.target.value)} placeholder="Description (optional)" className="w-full border rounded px-3 py-2 text-sm" />
-            <button className="btn-primary w-full" type="submit">Create Category</button>
+            <input value={newCatName} onChange={(e) => setNewCatName(e.target.value)} placeholder={`New ${activeTab.replace('_',' ')} category name...`} required className="w-full border rounded px-3 py-2 text-sm" />
+            <textarea value={newCatDesc} onChange={(e) => setNewCatDesc(e.target.value)} placeholder="Description (optional)" className="w-full border rounded px-3 py-2 text-sm" />
+            <div className="flex gap-2">
+                <select
+                  value={newCatType}
+                  onChange={(e) => setNewCatType(e.target.value)}
+                  className="flex-1 border rounded px-2 py-2 text-sm"
+                >
+                  <option value="greeting">Main Greeting</option>
+                  <option value="press1">Press 1 Prompt</option>
+                </select>
+                <button className="btn-primary flex-1" type="submit">Create Category</button>
+            </div>
           </form>
 
           <div className="mt-5 space-y-2">
             {categories.map((cat) => (
               <div key={cat.id} className="border rounded p-3 flex items-center justify-between">
                 <div>
-                  <p className="font-medium text-sm">{cat.name} <span className="text-[10px] bg-gray-100 px-1 rounded uppercase">{cat.mode?.replace('_', ' ')}</span></p>
+                  <div className="flex items-center gap-2">
+                    <p className="font-medium text-sm">{cat.name}</p>
+                    <span className={`text-[8px] font-bold uppercase px-1.5 py-0.5 rounded ${cat.category_type === 'press1' ? 'bg-orange-100 text-orange-700' : 'bg-blue-100 text-blue-700'}`}>
+                      {cat.category_type === 'press1' ? 'Digit Prompt' : 'Greeting'}
+                    </span>
+                  </div>
                   <p className="text-xs text-gray-500">{cat.template_count || 0} template(s)</p>
                 </div>
                 <button onClick={() => handleDeleteCategory(cat.id)} className="text-xs text-red-600 hover:underline">Delete</button>
@@ -205,7 +216,9 @@ export default function TemplateManagerPage() {
               <select value={tplCategory} onChange={(e) => setTplCategory(e.target.value)} required className="col-span-1 border rounded px-3 py-2 text-sm">
                 <option value="">Select Category</option>
                 {categories.map((cat) => (
-                  <option key={cat.id} value={cat.id}>{cat.name}</option>
+                  <option key={cat.id} value={cat.id}>
+                    {cat.name} ({cat.category_type === 'press1' ? 'Digit Prompt' : 'Greeting'})
+                  </option>
                 ))}
               </select>
             </div>
