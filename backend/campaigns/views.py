@@ -225,10 +225,8 @@ class SingleCallViewSet(viewsets.ModelViewSet):
             return Response({"error": "expected_digits must be between 1 and 10"}, status=status.HTTP_400_BAD_REQUEST)
 
         mode = request.data.get("mode", "audio_only")
-        if mode not in {"audio_only", "tts_template", "tts_script"}:
+        if mode not in {"audio_only", "tts_script"}:
             return Response({"error": "Invalid mode"}, status=status.HTTP_400_BAD_REQUEST)
-        if mode == "tts_template" and not request.data.get("template_category"):
-            return Response({"error": "template_category is required for tts_template mode"}, status=status.HTTP_400_BAD_REQUEST)
         if mode == "tts_script" and not (request.data.get("tts_script") or "").strip():
             return Response({"error": "tts_script is required for tts_script mode"}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -250,7 +248,7 @@ class SingleCallViewSet(viewsets.ModelViewSet):
         # Reset for redial
         call.status = "idle"
         call.dtmf_responses = ""
-        call.duration_seconds = None
+        call.duration_seconds = 0
         call.save()
         place_single_call_task.delay(call.id)
         return Response({"status": "Dialing initiated"}) # Changed message
@@ -347,7 +345,11 @@ class QuestionCategoryViewSet(viewsets.ModelViewSet):
     pagination_class = TemplatePagination
 
     def get_queryset(self):
-        return QuestionCategory.objects.annotate(template_count=Count("templates")).order_by("name")
+        qs = QuestionCategory.objects.annotate(template_count=Count("templates")).order_by("name")
+        mode = self.request.query_params.get("mode")
+        if mode:
+            qs = qs.filter(mode=mode)
+        return qs
 
 
 class AudioTemplateViewSet(viewsets.ModelViewSet):
@@ -358,9 +360,12 @@ class AudioTemplateViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         qs = AudioTemplate.objects.select_related("category").order_by("-created_at")
         category_id = self.request.query_params.get("category")
+        mode = self.request.query_params.get("mode")
         search = self.request.query_params.get("search")
         if category_id:
             qs = qs.filter(category_id=category_id)
+        if mode:
+            qs = qs.filter(mode=mode)
         if search:
             qs = qs.filter(name__icontains=search)
         return qs

@@ -5,7 +5,6 @@ from django.utils import timezone
 class SingleCall(models.Model):
     MODE_CHOICES = [
         ("audio_only", "Audio Only"),
-        ("tts_template", "TTS + Template"),
         ("tts_script", "TTS + Custom Script"),
     ]
     STATUS_CHOICES = [
@@ -49,8 +48,6 @@ class SingleCall(models.Model):
     )
     tts_script = models.TextField(blank=True, default="")
     press1_tts_script = models.TextField(blank=True, default="")
-    tts_intro_file = models.FileField(upload_to='single_call_audio/', null=True, blank=True)
-    tts_outro_file = models.FileField(upload_to='single_call_audio/', null=True, blank=True)
     audio_file = models.FileField(upload_to='single_call_audio/', null=True, blank=True)
     audio_file_reprompt = models.FileField(upload_to='single_call_audio/', null=True, blank=True)
     audio_file_timeout = models.FileField(upload_to='single_call_audio/', null=True, blank=True)
@@ -60,13 +57,21 @@ class SingleCall(models.Model):
     audio_file_press2 = models.FileField(upload_to='single_call_audio/', null=True, blank=True)
     audio_file_onhold = models.FileField(upload_to='single_call_audio/', null=True, blank=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='idle')
-    dtmf_responses = models.CharField(max_length=100, blank=True)  # accumulates all digits
-    duration_seconds = models.IntegerField(null=True, blank=True)
+    dtmf_responses = models.CharField(max_length=255, blank=True, default='')  # accumulates all digits
+    duration_seconds = models.IntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ['-created_at']
+
+    def save(self, *args, **kwargs):
+        if self.selected_template:
+            # Sync mode and expected_digits from template if not manually overridden
+            # (In the new simplified UI, they are always inherited)
+            self.mode = self.selected_template.mode
+            self.expected_digits = self.selected_template.expected_digits
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"Call to {self.phone} [{self.status}]"
@@ -143,7 +148,13 @@ class CallLog(models.Model):
 
 
 class QuestionCategory(models.Model):
+    MODE_CHOICES = [
+        ("audio_only", "Audio Only"),
+        ("tts_script", "TTS + Custom Script"),
+    ]
+
     name = models.CharField(max_length=100, unique=True)
+    mode = models.CharField(max_length=25, choices=MODE_CHOICES, default="audio_only")
     description = models.TextField(blank=True)
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -156,15 +167,25 @@ class QuestionCategory(models.Model):
 
 
 class AudioTemplate(models.Model):
+    MODE_CHOICES = [
+        ("audio_only", "Audio Only"),
+        ("tts_script", "TTS + Custom Script"),
+    ]
+
     category = models.ForeignKey(QuestionCategory, related_name="templates", on_delete=models.CASCADE)
     name = models.CharField(max_length=150)
-    prompt_text = models.TextField(
+    mode = models.CharField(max_length=25, choices=MODE_CHOICES, default="audio_only")
+    
+    greeting_script = models.TextField(
         blank=True,
-        help_text="Optional question text used for dynamic TTS greetings.",
+        help_text="The full script for TTS + Custom Script mode.",
     )
-    tts_intro_audio = models.FileField(upload_to="question_templates/", null=True, blank=True)
-    tts_outro_audio = models.FileField(upload_to="question_templates/", null=True, blank=True)
-    greeting_audio = models.FileField(upload_to="question_templates/")
+    
+    # Core assets
+    greeting_audio = models.FileField(upload_to="question_templates/", null=True, blank=True)
+
+    expected_digits = models.PositiveIntegerField(default=4)
+
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -174,7 +195,7 @@ class AudioTemplate(models.Model):
         unique_together = ("category", "name")
 
     def __str__(self):
-        return f"{self.category.name}: {self.name}"
+        return f"{self.category.name}: {self.name} ({self.get_mode_display()})"
 
 
 class ProcessedWebhookEvent(models.Model):

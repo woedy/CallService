@@ -52,25 +52,18 @@ function FileUploadField({ label, onChange }) {
 }
 
 export default function SingleCallPage() {
-    const [mode, setMode] = useState('audio_only');
     const [phone, setPhone] = useState('');
     const [callerId, setCallerId] = useState('');
     const [recipientName, setRecipientName] = useState('');
     const [note, setNote] = useState('');
-    const [expectedDigits, setExpectedDigits] = useState(4);
-    const [audioFile, setAudioFile] = useState(null);
-    const [audioFileReprompt, setAudioFileReprompt] = useState(null);
-    const [audioFileTimeout, setAudioFileTimeout] = useState(null);
-    const [audioFileGoodbye, setAudioFileGoodbye] = useState(null);
-    const [audioFileValidate, setAudioFileValidate] = useState(null);
-    const [audioFilePress1, setAudioFilePress1] = useState(null);
-    const [audioFilePress2, setAudioFilePress2] = useState(null);
-    const [audioFileOnhold, setAudioFileOnhold] = useState(null);
-    const [templateCategory, setTemplateCategory] = useState('');
+    
+    // Template selection
     const [templateCategories, setTemplateCategories] = useState([]);
-    const [ttsScript, setTtsScript] = useState('');
-    const [ttsIntroFile, setTtsIntroFile] = useState(null);
-    const [ttsOutroFile, setTtsOutroFile] = useState(null);
+    const [selectedCategory, setSelectedCategory] = useState('');
+    const [templates, setTemplates] = useState([]);
+    const [selectedTemplate, setSelectedTemplate] = useState('');
+    const [activeTab, setActiveTab] = useState('audio_only');
+
     const [activeCall, setActiveCall] = useState(null);   // current call object
     const [logs, setLogs] = useState([]);
     const [history, setHistory] = useState([]);
@@ -93,35 +86,42 @@ export default function SingleCallPage() {
         }
     }, []);
 
+    const fetchCategories = useCallback(async (mode) => {
+        try {
+            const res = await api.get(`/template-categories/?mode=${mode}&page_size=100`);
+            setTemplateCategories(res.data.results || []);
+        } catch {
+            setError('Failed to load categories');
+        }
+    }, []);
+
+    const fetchTemplates = useCallback(async (catId, mode) => {
+        if (!catId) {
+            setTemplates([]);
+            return;
+        }
+        try {
+            const res = await api.get(`/audio-templates/?category=${catId}&mode=${mode}&page_size=100`);
+            setTemplates(res.data.results || []);
+        } catch {
+            setError('Failed to load templates');
+        }
+    }, []);
+
     useEffect(() => {
         fetchHistory();
-        api.get('/template-categories/?page_size=100')
-            .then(res => setTemplateCategories(res.data.results || []))
-            .catch(() => {});
     }, [fetchHistory]);
 
     useEffect(() => {
-        if (mode === 'audio_only') {
-            setTemplateCategory('');
-            setTtsScript('');
-            setTtsIntroFile(null);
-            setTtsOutroFile(null);
-            return;
-        }
-        if (mode === 'tts_template') {
-            setTtsScript('');
-            setAudioFile(null);
-            setAudioFilePress2(null);
-            setAudioFileOnhold(null);
-            return;
-        }
-        if (mode === 'tts_script') {
-            setTemplateCategory('');
-            setAudioFile(null);
-            setAudioFilePress2(null);
-            setAudioFileOnhold(null);
-        }
-    }, [mode]);
+        fetchCategories(activeTab);
+        setSelectedCategory('');
+        setTemplates([]);
+        setSelectedTemplate('');
+    }, [activeTab, fetchCategories]);
+
+    useEffect(() => {
+        fetchTemplates(selectedCategory, activeTab);
+    }, [selectedCategory, activeTab, fetchTemplates]);
 
     const connectWebSocket = useCallback((callId) => {
         if (socketRef.current) socketRef.current.close();
@@ -153,34 +153,23 @@ export default function SingleCallPage() {
     const handleDial = async (e) => {
         e.preventDefault();
         setError('');
+        if (!phone || !selectedTemplate) {
+            setError('Phone number and Template are required.');
+            return;
+        }
         setDialing(true);
         setLogs([]);
 
         try {
             // Create the call record
             const formData = new FormData();
-            formData.append('mode', mode);
             formData.append('phone', phone);
             if (callerId) formData.append('caller_id', callerId);
             if (recipientName) formData.append('recipient_name', recipientName);
             if (note) formData.append('note', note);
-            formData.append('expected_digits', String(expectedDigits));
-            if (mode === 'tts_template' && templateCategory) formData.append('template_category', templateCategory);
-            if (mode === 'tts_script' && ttsScript) formData.append('tts_script', ttsScript);
-            if (mode !== 'audio_only' && ttsIntroFile) formData.append('tts_intro_file', ttsIntroFile);
-            if (mode !== 'audio_only' && ttsOutroFile) formData.append('tts_outro_file', ttsOutroFile);
-            if (mode === 'audio_only' && audioFile) formData.append('audio_file', audioFile);
-            if (audioFileReprompt) formData.append('audio_file_reprompt', audioFileReprompt);
-            if (audioFileTimeout) formData.append('audio_file_timeout', audioFileTimeout);
-            if (audioFileGoodbye) formData.append('audio_file_goodbye', audioFileGoodbye);
-            if (audioFileValidate) formData.append('audio_file_validate', audioFileValidate);
-            if (audioFilePress1) formData.append('audio_file_press1', audioFilePress1);
-            if (mode === 'audio_only' && audioFilePress2) formData.append('audio_file_press2', audioFilePress2);
-            if (mode === 'audio_only' && audioFileOnhold) formData.append('audio_file_onhold', audioFileOnhold);
+            formData.append('selected_template', selectedTemplate);
 
-            const res = await api.post('/single-calls/', formData, {
-                headers: { 'Content-Type': 'multipart/form-data' },
-            });
+            const res = await api.post('/single-calls/', formData);
             const call = res.data;
             setActiveCall(call);
 
@@ -239,13 +228,15 @@ export default function SingleCallPage() {
         setActiveCall(call);
         setLogs([]);
         setPhone(call.phone);
-        setMode(call.mode || 'audio_only');
         setCallerId(call.caller_id || '');
         setRecipientName(call.recipient_name || '');
         setNote(call.note || '');
-        setExpectedDigits(call.expected_digits || 4);
-        setTemplateCategory(call.template_category || '');
-        setTtsScript(call.tts_script || '');
+        // Note: selected_template might need to be resolved if we want to show it in the dropdown
+        if (call.selected_template) {
+           // We might need to fetch categories/templates if not present
+           setSelectedTemplate(call.selected_template);
+        }
+        
         try {
             const res = await api.get(`/single-calls/${call.id}/logs/`);
             // Convert stored logs to display format
@@ -270,133 +261,129 @@ export default function SingleCallPage() {
             <div className="lg:col-span-2 space-y-6">
 
                 {/* Dial form */}
-                <div className="bg-white shadow sm:rounded-lg px-4 py-5 sm:p-6">
-                    <h2 className="text-lg font-medium text-gray-900 mb-4">Place a Call</h2>
-                    <div className="mb-4 flex flex-wrap gap-2">
-                        <button type="button" onClick={() => setMode('audio_only')} className={mode === 'audio_only' ? 'btn-primary' : 'btn-secondary'}>1) Audio Only</button>
-                        <button type="button" onClick={() => setMode('tts_template')} className={mode === 'tts_template' ? 'btn-primary' : 'btn-secondary'}>2) TTS + Template</button>
-                        <button type="button" onClick={() => setMode('tts_script')} className={mode === 'tts_script' ? 'btn-primary' : 'btn-secondary'}>3) TTS + Custom Script</button>
-                    </div>
-                    {error && <p className="text-sm text-red-600 mb-3">{error}</p>}
-                    <form onSubmit={handleDial} className="space-y-4">
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700">Phone Number</label>
-                                <input
-                                    type="text"
-                                    value={phone}
-                                    onChange={e => setPhone(e.target.value)}
-                                    placeholder="+1234567890 or 6001"
-                                    required
-                                    className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm px-3 py-2 text-sm focus:ring-indigo-500 focus:border-indigo-500"
-                                />
-                            </div>
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700">Caller ID (optional)</label>
-                                <input
-                                    type="text"
-                                    value={callerId}
-                                    onChange={e => setCallerId(e.target.value)}
-                                    placeholder="e.g. My Company <8001234567>"
-                                    className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm px-3 py-2 text-sm focus:ring-indigo-500 focus:border-indigo-500"
-                                />
-                            </div>
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700">Recipient Name (optional)</label>
-                                <input
-                                    type="text"
-                                    value={recipientName}
-                                    onChange={e => setRecipientName(e.target.value)}
-                                    placeholder="e.g. Cynthia Morgan"
-                                    className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm px-3 py-2 text-sm focus:ring-indigo-500 focus:border-indigo-500"
-                                />
-                            </div>
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700">Note (optional)</label>
-                                <input
-                                    type="text"
-                                    value={note}
-                                    onChange={e => setNote(e.target.value)}
-                                    placeholder="e.g. Test call, Lead name..."
-                                    className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm px-3 py-2 text-sm focus:ring-indigo-500 focus:border-indigo-500"
-                                />
-                            </div>
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700">Expected Digits</label>
-                                <input
-                                    type="number"
-                                    min="1"
-                                    max="10"
-                                    value={expectedDigits}
-                                    onChange={e => setExpectedDigits(Number(e.target.value))}
-                                    className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm px-3 py-2 text-sm focus:ring-indigo-500 focus:border-indigo-500"
-                                />
-                            </div>
-                            {mode === 'tts_template' && (
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700">Template Category</label>
-                                <select
-                                    value={templateCategory}
-                                    onChange={e => setTemplateCategory(e.target.value)}
-                                    className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm px-3 py-2 text-sm focus:ring-indigo-500 focus:border-indigo-500"
+                <div className="bg-white shadow sm:rounded-lg overflow-hidden">
+                    <div className="px-4 py-3 border-b border-gray-100 bg-gray-50 flex items-center justify-between">
+                        <h2 className="text-md font-bold text-gray-800 uppercase tracking-tight">Single Call Terminal</h2>
+                        <div className="flex gap-1 bg-gray-200 p-1 rounded-lg">
+                            {['audio_only', 'tts_script'].map(m => (
+                                <button
+                                    key={m}
+                                    type="button"
+                                    onClick={() => setActiveTab(m)}
+                                    className={`text-[9px] font-bold px-3 py-1 rounded-md transition-all uppercase ${activeTab === m ? 'bg-white text-indigo-700 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
                                 >
-                                    <option value="">No template category</option>
-                                    {templateCategories.map(cat => (
-                                        <option key={cat.id} value={cat.id}>{cat.name}</option>
-                                    ))}
-                                </select>
-                            </div>
-                            )}
-                            {mode === 'tts_script' && (
-                                <div className="sm:col-span-2">
-                                    <label className="block text-sm font-medium text-gray-700">Custom Greeting Script</label>
-                                    <textarea
-                                        value={ttsScript}
-                                        onChange={e => setTtsScript(e.target.value)}
-                                        placeholder="Type full greeting script..."
-                                        className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm px-3 py-2 text-sm focus:ring-indigo-500 focus:border-indigo-500"
-                                        rows={3}
-                                    />
-                                </div>
-                            )}
-                        </div>
-                        {mode === 'audio_only' && (
-                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                                <FileUploadField label="Greeting Audio" onChange={setAudioFile} />
-                                <FileUploadField label="Reprompt Audio" onChange={setAudioFileReprompt} />
-                                <FileUploadField label="Timeout Audio" onChange={setAudioFileTimeout} />
-                                <FileUploadField label="Goodbye Audio" onChange={setAudioFileGoodbye} />
-                                <FileUploadField label="Validate Code Audio" onChange={setAudioFileValidate} />
-                                <FileUploadField label="Press 1 Audio" onChange={setAudioFilePress1} />
-                                <FileUploadField label="Press 2 Audio" onChange={setAudioFilePress2} />
-                                <FileUploadField label="OnHold Audio" onChange={setAudioFileOnhold} />
-                            </div>
-                        )}
-                        {(mode === 'tts_template' || mode === 'tts_script') && (
-                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                                <FileUploadField label="TTS Intro Clip" onChange={setTtsIntroFile} />
-                                <FileUploadField label="TTS Outro Clip" onChange={setTtsOutroFile} />
-                                <FileUploadField label="Reprompt Audio" onChange={setAudioFileReprompt} />
-                                <FileUploadField label="Timeout Audio" onChange={setAudioFileTimeout} />
-                                <FileUploadField label="Goodbye Audio" onChange={setAudioFileGoodbye} />
-                                <FileUploadField label="Validate Code Audio" onChange={setAudioFileValidate} />
-                                <FileUploadField label="Press 1 Audio" onChange={setAudioFilePress1} />
-                            </div>
-                        )}
-                        <p className="mt-2 text-[10px] text-gray-400 italic">
-                            Show only the options needed for the selected call mode. Leave blank to use system defaults.
-                        </p>
-                        <div className="flex gap-3">
-                            <button type="submit" disabled={dialing || isActive} className="btn-primary">
-                                {dialing ? 'Placing call...' : '📞 Dial'}
-                            </button>
-                            {activeCall && !isActive && (
-                                <button type="button" onClick={handleRedial} className="btn-secondary">
-                                    🔄 Redial
+                                    {m.replace('_', ' ')}
                                 </button>
-                            )}
+                            ))}
                         </div>
-                    </form>
+                    </div>
+
+                    <div className="px-4 py-5 sm:p-6">
+                        {/* Mode Instruction Bar */}
+                        <div className="mb-6 p-3 bg-indigo-50 border-l-4 border-indigo-400 rounded-r-md">
+                            <p className="text-xs text-indigo-700 leading-relaxed font-medium">
+                                {activeTab === 'audio_only' && "📂 AUDIO ONLY: Standard IVR. Select a template with pre-recorded audio assets and digit logic."}
+                                {activeTab === 'tts_script' && "📜 TTS SCRIPT: Full Script mode. Plays the entire script as TTS and hangs up immediately (no digits)."}
+                            </p>
+                        </div>
+
+                        {error && <p className="text-sm text-red-600 mb-4 bg-red-50 border border-red-100 px-3 py-2 rounded-md">{error}</p>}
+                        
+                        <form onSubmit={handleDial} className="space-y-6">
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+                                {/* Left Side: Destination */}
+                                <div className="space-y-4">
+                                    <h4 className="text-[11px] font-bold text-gray-400 uppercase tracking-widest border-b pb-1">Destination</h4>
+                                    <div>
+                                        <label className="block text-xs font-semibold text-gray-600">Phone Number*</label>
+                                        <input
+                                            type="text"
+                                            value={phone}
+                                            onChange={e => setPhone(e.target.value)}
+                                            placeholder="+1234567890"
+                                            required
+                                            className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm px-3 py-2 text-sm focus:ring-indigo-500 focus:border-indigo-500"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs font-semibold text-gray-600">Recipient Name</label>
+                                        <input
+                                            type="text"
+                                            value={recipientName}
+                                            onChange={e => setRecipientName(e.target.value)}
+                                            placeholder="e.g. Cynthia Morgan"
+                                            className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm px-3 py-2 text-sm focus:ring-indigo-500 focus:border-indigo-500"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs font-semibold text-gray-600">Caller ID / Company Name</label>
+                                        <input
+                                            type="text"
+                                            value={callerId}
+                                            onChange={e => setCallerId(e.target.value)}
+                                            placeholder="e.g. QuiQuesh Company"
+                                            className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm px-3 py-2 text-sm focus:ring-indigo-500 focus:border-indigo-500"
+                                        />
+                                    </div>
+                                </div>
+
+                                {/* Right Side: Template Selection */}
+                                <div className="space-y-4">
+                                    <h4 className="text-[11px] font-bold text-gray-400 uppercase tracking-widest border-b pb-1">Flow Configuration</h4>
+                                    <div>
+                                        <label className="block text-xs font-semibold text-gray-600">Feature Category*</label>
+                                        <select
+                                            value={selectedCategory}
+                                            onChange={e => setSelectedCategory(e.target.value)}
+                                            required
+                                            className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm px-3 py-2 text-sm focus:ring-indigo-500 focus:border-indigo-500"
+                                        >
+                                            <option value="">Select a Category</option>
+                                            {templateCategories.map(cat => (
+                                                <option key={cat.id} value={cat.id}>{cat.name}</option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs font-semibold text-gray-600">Select Template*</label>
+                                        <select
+                                            value={selectedTemplate}
+                                            onChange={e => setSelectedTemplate(e.target.value)}
+                                            required
+                                            disabled={!selectedCategory}
+                                            className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm px-3 py-2 text-sm focus:ring-indigo-500 focus:border-indigo-500 disabled:bg-gray-50"
+                                        >
+                                            <option value="">Select a Template</option>
+                                            {templates.map(tpl => (
+                                                <option key={tpl.id} value={tpl.id}>
+                                                    {tpl.name} ({tpl.mode.replace('_',' ').toUpperCase()})
+                                                </option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs font-semibold text-gray-600">Call Note</label>
+                                        <input
+                                            type="text"
+                                            value={note}
+                                            onChange={e => setNote(e.target.value)}
+                                            placeholder="e.g. Lead verification"
+                                            className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm px-3 py-2 text-sm focus:ring-indigo-500 focus:border-indigo-500"
+                                        />
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="flex items-center justify-between border-t pt-5">
+                                <p className="text-[10px] text-gray-400 italic">
+                                    System will automatically pull audio assets and logic from the selected template.
+                                </p>
+                                <button type="submit" disabled={dialing || isActive} className={`btn-primary px-8 py-2.5 rounded-full shadow-lg transform transition-all active:scale-95 ${dialing || isActive ? 'opacity-50 cursor-not-allowed' : 'hover:scale-105'}`}>
+                                    {dialing ? 'DIALING...' : isActive ? 'CALL IN PROGRESS' : '🚀 START CALL'}
+                                </button>
+                            </div>
+                        </form>
+                    </div>
                 </div>
 
                 {/* Active call status + live log */}

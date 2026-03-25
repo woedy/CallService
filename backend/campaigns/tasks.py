@@ -204,7 +204,7 @@ def place_single_call_task(call_id):
     from .models import SingleCall, AudioTemplate
 
     try:
-        call = SingleCall.objects.get(id=call_id)
+        call = SingleCall.objects.select_related("selected_template").get(id=call_id)
     except SingleCall.DoesNotExist:
         return
 
@@ -218,68 +218,70 @@ def place_single_call_task(call_id):
     else:
         channel = f"PJSIP/my-trunk/sip:{call.phone}@my-trunk"
 
-    mode = call.mode or "audio_only"
-    # Audio/template selection:
-    # - audio_only: use uploaded greeting or random category template greeting audio.
-    # - tts_template: use random category template prompt_text + optional intro/outro clips.
-    # - tts_script: use free-form script + optional intro/outro clips.
-    greeting_file = call.audio_file
-    selected_template = None
-    if call.audio_file:
-        context = "single-call-audio"
-    elif call.template_category_id:
-        candidates = list(
-            AudioTemplate.objects.filter(
-                category_id=call.template_category_id,
-                is_active=True,
-            )
-        )
-        if candidates:
-            chosen = random.choice(candidates)
-            call.selected_template = chosen
-            call.save(update_fields=["selected_template", "updated_at"])
-            greeting_file = chosen.greeting_audio
-            selected_template = chosen
-            context = "single-call-audio"
-            _log_and_push(call, f"Using template: {chosen.name}")
-        else:
-            context = "single-call-agent"
-    else:
+    # Priority 1: Use the template if selected
+    tpl = call.selected_template
+    
+    # Determine effectively active mode
+    mode = tpl.mode if tpl else (call.mode or "audio_only")
+    
+    # Determine dialplan context
+    # If it's a template/script mode, we use single-call-audio as it handles TTS logic
+    # If no audio is provided and it's audio_only, it might be an agent-only call
+    context = "single-call-audio"
+    if mode == "audio_only" and not (tpl and tpl.greeting_audio) and not call.audio_file:
         context = "single-call-agent"
 
     cid_name = call.caller_id if call.caller_id else "CallService"
-    expected_digits = max(1, min(int(call.expected_digits or 4), 10))
-
+    expected_digits = max(0, min(int(call.expected_digits or 4), 10))
     tts_enabled = getattr(settings, "TTS_ENABLED", True)
+    
     greeting_mode = "single"
     dynamic_intro_sound = None
     dynamic_greeting_sound = None
     dynamic_outro_sound = None
     dynamic_press1_sound = None
-    if tts_enabled and mode in {"tts_template", "tts_script"}:
-        base_prompt = ""
-        if mode == "tts_template" and selected_template and selected_template.prompt_text:
-            base_prompt = selected_template.prompt_text
-            dynamic_intro_sound = _asterisk_sound(selected_template.tts_intro_audio, "")
-            dynamic_outro_sound = _asterisk_sound(selected_template.tts_outro_audio, "")
-        elif mode == "tts_script":
-            base_prompt = (call.tts_script or "").strip()
-            dynamic_intro_sound = _asterisk_sound(call.tts_intro_file, "")
-            dynamic_outro_sound = _asterisk_sound(call.tts_outro_file, "")
 
-        if base_prompt:
-            greeting_text = (
-                f"Hello {call.recipient_name or 'there'}. "
-                f"This is a quick question and answer from {cid_name}. "
-                f"{base_prompt}. "
-                f"Press 1 to answer or press 2 to talk to an agent."
-            )
-            dynamic_greeting_sound = _synthesize_tts_sound(greeting_text, "greeting")
-            if dynamic_greeting_sound:
-                greeting_mode = "split"
+    # Resolve Greeting Mode and Sounds
+    if tts_enabled and mode == "tts_script":
+        # Full Custom Script - Playback only, no digits
+        raw_script = tpl.greeting_script if tpl else call.tts_script
+        final_script = raw_script.replace("{recipient_name}", call.recipient_name or "there")
+        final_script = final_script.replace("{caller_id}", call.caller_id or "the service")
+        
+        # Play the full script and hang up
+        greeting_mode = "playback"
+        dynamic_greeting_sound = f"say:{final_script}"
+        expected_digits = 0
+        dynamic_intro_sound = None
+        dynamic_outro_sound = None
+        
+        # Determine Press 1 instructions if we expect digits
+        if expected_digits:
+            press1_text = f"Enter your {expected_digits} digit answer and press the pound key when done."
+            dynamic_press1_sound = f"say:{press1_text}"
 
-        press1_text = f"Enter your {expected_digits} digit answer and press the pound key when done."
-        dynamic_press1_sound = _synthesize_tts_sound(press1_text, "press1")
+    # Final variable assembly
+    # Order of priority for constants: SingleCall override -> Global Default (Template fields removed as constants)
+    def _res(call_field, def_key):
+        if call_field: return _asterisk_sound(call_field, "")
+        return DEFAULT_CUSTOM_AUDIO[def_key]
+
+    variables = {
+        "SINGLE_CALL_ID": str(call.id),
+        "GREETING_MODE": greeting_mode,
+        "EXPECTED_DIGITS": str(expected_digits),
+        "AUDIO_GREETING": _res(call.audio_file, "greeting") if not tpl else _asterisk_sound(tpl.greeting_audio, ""),
+        "AUDIO_GREETING_INTRO": dynamic_intro_sound or "",
+        "AUDIO_GREETING_TTS": dynamic_greeting_sound or "",
+        "AUDIO_GREETING_OUTRO": dynamic_outro_sound or "",
+        "AUDIO_REPROMPT": _res(call.audio_file_reprompt, "reprompt"),
+        "AUDIO_TIMEOUT": _res(call.audio_file_timeout, "timeout"),
+        "AUDIO_GOODBYE": _res(call.audio_file_goodbye, "goodbye"),
+        "AUDIO_VALIDATE": _res(call.audio_file_validate, "validate"),
+        "AUDIO_PRESS1": dynamic_press1_sound or _res(call.audio_file_press1, "press1"),
+        "AUDIO_PRESS2": _res(call.audio_file_press2, "press2"),
+        "AUDIO_ONHOLD": _res(call.audio_file_onhold, "onhold"),
+    }
 
     import redis
     import json
@@ -294,22 +296,7 @@ def place_single_call_task(call_id):
         "priority": 1,
         "timeout": "30000",
         "account": f"single_{call.id}",
-        "variables": {
-            "SINGLE_CALL_ID": str(call.id),
-            "GREETING_MODE": greeting_mode,
-            "AUDIO_GREETING": _asterisk_sound(greeting_file, DEFAULT_CUSTOM_AUDIO["greeting"]),
-            "AUDIO_GREETING_INTRO": dynamic_intro_sound or "",
-            "AUDIO_GREETING_TTS": dynamic_greeting_sound or "",
-            "AUDIO_GREETING_OUTRO": dynamic_outro_sound or "",
-            "AUDIO_REPROMPT": _asterisk_sound(call.audio_file_reprompt, DEFAULT_CUSTOM_AUDIO["reprompt"]),
-            "AUDIO_TIMEOUT": _asterisk_sound(call.audio_file_timeout, DEFAULT_CUSTOM_AUDIO["timeout"]),
-            "AUDIO_GOODBYE": _asterisk_sound(call.audio_file_goodbye, DEFAULT_CUSTOM_AUDIO["goodbye"]),
-            "AUDIO_VALIDATE": _asterisk_sound(call.audio_file_validate, DEFAULT_CUSTOM_AUDIO["validate"]),
-            "AUDIO_PRESS1": dynamic_press1_sound or _asterisk_sound(call.audio_file_press1, DEFAULT_CUSTOM_AUDIO["press1"]),
-            "AUDIO_PRESS2": _asterisk_sound(call.audio_file_press2, DEFAULT_CUSTOM_AUDIO["press2"]),
-            "AUDIO_ONHOLD": _asterisk_sound(call.audio_file_onhold, DEFAULT_CUSTOM_AUDIO["onhold"]),
-            "EXPECTED_DIGITS": str(expected_digits),
-        }
+        "variables": variables
     }
     r.publish("ami_commands", json.dumps(payload))
 

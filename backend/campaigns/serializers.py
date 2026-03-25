@@ -46,8 +46,6 @@ class QuestionCategorySerializer(serializers.ModelSerializer):
 
 class AudioTemplateSerializer(serializers.ModelSerializer):
     greeting_audio_url = serializers.SerializerMethodField()
-    tts_intro_audio_url = serializers.SerializerMethodField()
-    tts_outro_audio_url = serializers.SerializerMethodField()
     category_name = serializers.CharField(source="category.name", read_only=True)
 
     class Meta:
@@ -57,38 +55,23 @@ class AudioTemplateSerializer(serializers.ModelSerializer):
             "category",
             "category_name",
             "name",
-            "prompt_text",
-            "tts_intro_audio",
-            "tts_outro_audio",
+            "mode",
+            "greeting_script",
             "greeting_audio",
             "greeting_audio_url",
-            "tts_intro_audio_url",
-            "tts_outro_audio_url",
+            "expected_digits",
             "is_active",
             "created_at",
             "updated_at",
         )
 
-    def get_greeting_audio_url(self, obj):
-        request = self.context.get("request")
-        if not obj.greeting_audio:
+    def _get_url(self, obj, field_name):
+        field = getattr(obj, field_name)
+        if not field:
             return None
+        request = self.context.get("request")
         if request:
-            return request.build_absolute_uri(obj.greeting_audio.url)
-        return obj.greeting_audio.url
+            return request.build_absolute_uri(field.url)
+        return field.url
 
-    def get_tts_intro_audio_url(self, obj):
-        if not obj.tts_intro_audio:
-            return None
-        request = self.context.get("request")
-        if request:
-            return request.build_absolute_uri(obj.tts_intro_audio.url)
-        return obj.tts_intro_audio.url
-
-    def get_tts_outro_audio_url(self, obj):
-        if not obj.tts_outro_audio:
-            return None
-        request = self.context.get("request")
-        if request:
-            return request.build_absolute_uri(obj.tts_outro_audio.url)
-        return obj.tts_outro_audio.url
+    def get_greeting_audio_url(self, obj): return self._get_url(obj, "greeting_audio")
