@@ -39,7 +39,7 @@ def _asterisk_sound(file_field, default_sound: str) -> str:
 
 
 def _synthesize_tts_sound(text: str, prefix: str) -> str | None:
-    """Generate or reuse a WAV TTS file and return Asterisk sound name."""
+    """Generate or reuse a WAV TTS file (Piper) converted to 8kHz Mono (Sox)."""
     cleaned = (text or "").strip()
     if not cleaned:
         return None
@@ -48,27 +48,59 @@ def _synthesize_tts_sound(text: str, prefix: str) -> str | None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     digest = hashlib.sha1(cleaned.encode("utf-8")).hexdigest()[:16]
-    filename = f"{prefix}_{digest}.wav"
-    out_path = out_dir / filename
+    final_filename = f"{prefix}_{digest}.wav"
+    final_path = out_dir / final_filename
 
-    if not out_path.exists():
-        cmd = [
-            "espeak",
-            "-s",
-            str(getattr(settings, "TTS_SPEECH_RATE", 145)),
-            "-v",
-            getattr(settings, "TTS_VOICE", "en"),
-            "-w",
-            str(out_path),
-            cleaned,
+    # If the converted 8k file already exists, reuse it
+    if final_path.exists():
+        return f"custom/tts_prompts/{final_filename[:-4]}"
+
+    # Paths for processing
+    tmp_raw = f"/tmp/{prefix}_{digest}_raw.wav"
+    model_path = "/usr/share/piper-models/en_US-lessac-medium.onnx"
+
+    try:
+        # Step 1: Synthesize with Piper (outputs standard WAV, usually 22050Hz)
+        piper_cmd = [
+            "piper",
+            "--model", model_path,
+            "--output_file", tmp_raw,
         ]
+        subprocess.run(piper_cmd, input=cleaned, text=True, check=True, capture_output=True)
+
+        # Step 2: Convert to 8000Hz Mono with Sox for Asterisk compatibility
+        sox_cmd = [
+            "sox",
+            tmp_raw,
+            "-r", "8000",
+            "-c", "1",
+            str(final_path),
+        ]
+        subprocess.run(sox_cmd, check=True, capture_output=True)
+
+        # Cleanup intermediate file
+        if os.path.exists(tmp_raw):
+            os.remove(tmp_raw)
+
+    except Exception as exc:
+        logger.warning(f"TTS Synthesis/Conversion failed: {exc}")
+        # Fallback to espeak if piper/sox fails during transition
         try:
-            subprocess.run(cmd, check=True, capture_output=True, text=True)
-        except Exception as exc:
-            logger.warning(f"TTS generation failed: {exc}")
+            espeak_tmp = f"/tmp/{prefix}_{digest}_espeak.wav"
+            espeak_cmd = ["espeak", "-w", espeak_tmp, cleaned]
+            subprocess.run(espeak_cmd, check=True)
+            
+            # Use sox to ensure the fallback is also 8kHz Mono
+            sox_cmd_fallback = ["sox", espeak_tmp, "-r", "8000", "-c", "1", str(final_path)]
+            subprocess.run(sox_cmd_fallback, check=True, capture_output=True)
+            
+            if os.path.exists(espeak_tmp):
+                os.remove(espeak_tmp)
+        except Exception as espeak_exc:
+            logger.error(f"Espeak fallback also failed: {espeak_exc}")
             return None
 
-    return f"custom/tts_prompts/{filename[:-4]}"
+    return f"custom/tts_prompts/{final_filename[:-4]}"
 
 
 def _push_ws_update(data: dict):
@@ -243,15 +275,17 @@ def place_single_call_task(call_id):
 
     # Resolve Greeting Mode and Sounds
     if tts_enabled and mode == "tts_script":
-        # Full Custom Script - Playback only, no digits
+        # Full Custom Script
         raw_script = tpl.greeting_script if tpl else call.tts_script
         final_script = raw_script.replace("{recipient_name}", call.recipient_name or "there")
         final_script = final_script.replace("{caller_id}", call.caller_id or "the service")
         
-        # Play the full script and hang up
-        greeting_mode = "playback"
+        # Determine if we should wait for digits or just play back
+        # If expected_digits is 0, we still use playback mode to just play and hang up
+        greeting_mode = "single" if expected_digits > 0 else "playback"
         dynamic_greeting_sound = _synthesize_tts_sound(final_script, "greeting")
-        expected_digits = 0
+        logger.info(f"TTS Script Mode: greeting_mode={greeting_mode}, dynamic_greeting_sound={dynamic_greeting_sound}")
+        
         dynamic_intro_sound = None
         dynamic_outro_sound = None
 
@@ -275,7 +309,7 @@ def place_single_call_task(call_id):
         "SINGLE_CALL_ID": str(call.id),
         "GREETING_MODE": greeting_mode,
         "EXPECTED_DIGITS": str(expected_digits),
-        "AUDIO_GREETING": _res(call.audio_file, "greeting") if not tpl else _asterisk_sound(tpl.greeting_audio, ""),
+        "AUDIO_GREETING": dynamic_greeting_sound or (_res(call.audio_file, "greeting") if not tpl else _asterisk_sound(tpl.greeting_audio, "")),
         "AUDIO_GREETING_INTRO": dynamic_intro_sound or "",
         "AUDIO_GREETING_TTS": dynamic_greeting_sound or "",
         "AUDIO_GREETING_OUTRO": dynamic_outro_sound or "",
@@ -287,6 +321,8 @@ def place_single_call_task(call_id):
         "AUDIO_PRESS2": _res(call.audio_file_press2, "press2"),
         "AUDIO_ONHOLD": _res(call.audio_file_onhold, "onhold"),
     }
+    
+    logger.info(f"Asterisk Variables for Call {call.id}: {variables}")
 
     import redis
     import json
