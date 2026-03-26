@@ -23,13 +23,15 @@ from .models import (
     ProcessedWebhookEvent,
     QuestionCategory,
     AudioTemplate,
+    TtsScriptTemplate,
 )
 from .serializers import (
     CampaignSerializer, ContactSerializer, CallLogSerializer,
     SingleCallSerializer, SingleCallLogSerializer,
     QuestionCategorySerializer, AudioTemplateSerializer,
+    TtsScriptTemplateSerializer,
 )
-from .tasks import start_campaign_task, place_single_call_task, _push_ws_update, _log_and_push
+from .tasks import start_campaign_task, place_single_call_task, _push_ws_update, _log_and_push, _synthesize_tts_sound
 
 logger = logging.getLogger(__name__)
 
@@ -227,8 +229,8 @@ class SingleCallViewSet(viewsets.ModelViewSet):
         mode = request.data.get("mode", "audio_only")
         if mode not in {"audio_only", "tts_script"}:
             return Response({"error": "Invalid mode"}, status=status.HTTP_400_BAD_REQUEST)
-        if mode == "tts_script" and not (request.data.get("tts_script") or "").strip():
-            return Response({"error": "tts_script is required for tts_script mode"}, status=status.HTTP_400_BAD_REQUEST)
+        # Note: We no longer strictly require greeting_script if other scripts might be provided,
+        # but for backward compatibility with the UI, we check if at least one script/template is set in tts mode.
 
         mutable_data = request.data.copy()
         mutable_data["phone"] = phone
@@ -263,7 +265,11 @@ class SingleCallViewSet(viewsets.ModelViewSet):
     def reprompt(self, request, pk=None):
         call = self.get_object()
 
-        context = "single-call-audio" if call.audio_file else "single-call-agent"
+        # Determine context: if it was an agent call vs audio call
+        context = "single-call-audio"
+        if call.mode == "audio_only" and not call.greeting_template and not call.audio_file:
+            context = "single-call-agent"
+
         call.dtmf_responses = ""
         call.save(update_fields=["dtmf_responses", "updated_at"])
         
@@ -286,8 +292,10 @@ class SingleCallViewSet(viewsets.ModelViewSet):
     def connect_agent(self, request, pk=None):
         call = self.get_object()
 
-        context = "single-call-audio" if call.audio_file else "single-call-agent"
-        
+        context = "single-call-audio"
+        if call.mode == "audio_only" and not call.greeting_template and not call.audio_file:
+            context = "single-call-agent"
+
         # Publish redirect command to Redis to connect to agent
         r = redis.from_url(settings.REDIS_URL, decode_responses=True)
         payload = {
@@ -307,8 +315,9 @@ class SingleCallViewSet(viewsets.ModelViewSet):
     def hangup(self, request, pk=None):
         call = self.get_object()
         
-        # Determine appropriate dialplan context
-        context = "single-call-audio" if call.audio_file else "single-call-agent"
+        context = "single-call-audio"
+        if call.mode == "audio_only" and not call.greeting_template and not call.audio_file:
+            context = "single-call-agent"
         
         r = redis.from_url(settings.REDIS_URL, decode_responses=True)
         # If call hasn't answered yet, physically drop the line
@@ -375,6 +384,38 @@ class AudioTemplateViewSet(viewsets.ModelViewSet):
         if search:
             qs = qs.filter(name__icontains=search)
         return qs
+
+
+class TtsScriptTemplateViewSet(viewsets.ModelViewSet):
+    queryset = TtsScriptTemplate.objects.all().order_by("-created_at")
+    serializer_class = TtsScriptTemplateSerializer
+    pagination_class = TemplatePagination
+
+
+class TtsPreviewView(APIView):
+    def post(self, request):
+        script = request.data.get("script", "").strip()
+        if not script:
+            return Response({"error": "No script provided"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Replace placeholders for preview
+        recipient_name = request.data.get("recipient_name", "John Doe")
+        caller_id = request.data.get("caller_id", "CallService")
+        
+        preview_text = script.replace("{recipient_name}", recipient_name)
+        preview_text = preview_text.replace("{caller_id}", caller_id)
+        
+        # Generate the sound (reuse if possible)
+        sound_path = _synthesize_tts_sound(preview_text, "preview")
+        if not sound_path:
+            return Response({"error": "Synthesis failed"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            
+        # sound_path is "custom/tts_prompts/filename"
+        # We need to return the URL: /media/tts_prompts/filename.wav
+        filename = sound_path.replace("custom/tts_prompts/", "")
+        url = request.build_absolute_uri(f"{settings.MEDIA_URL}tts_prompts/{filename}.wav")
+        
+        return Response({"url": url})
 
 # ---------------------------------------------------------------------------
 # Webhook — receives events from ami_listener

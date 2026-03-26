@@ -32,29 +32,45 @@ class SingleCall(models.Model):
         on_delete=models.SET_NULL,
         related_name="single_calls",
     )
-    selected_template = models.ForeignKey(
-        "AudioTemplate",
-        null=True,
-        blank=True,
-        on_delete=models.SET_NULL,
-        related_name="single_calls",
-    )
-    script_template = models.ForeignKey(
-        "TtsScriptTemplate",
-        null=True,
-        blank=True,
-        on_delete=models.SET_NULL,
-        related_name="single_calls",
+    # Templates for each stage
+    greeting_template = models.ForeignKey(
+        "AudioTemplate", null=True, blank=True, on_delete=models.SET_NULL, related_name="single_calls_greeting"
     )
     press1_template = models.ForeignKey(
-        "AudioTemplate",
-        null=True,
-        blank=True,
-        on_delete=models.SET_NULL,
-        related_name="single_calls_as_press1",
+        "AudioTemplate", null=True, blank=True, on_delete=models.SET_NULL, related_name="single_calls_press1"
     )
-    tts_script = models.TextField(blank=True, default="")
-    press1_tts_script = models.TextField(blank=True, default="")
+    press2_template = models.ForeignKey(
+        "AudioTemplate", null=True, blank=True, on_delete=models.SET_NULL, related_name="single_calls_press2"
+    )
+    reprompt_template = models.ForeignKey(
+        "AudioTemplate", null=True, blank=True, on_delete=models.SET_NULL, related_name="single_calls_reprompt"
+    )
+    timeout_template = models.ForeignKey(
+        "AudioTemplate", null=True, blank=True, on_delete=models.SET_NULL, related_name="single_calls_timeout"
+    )
+    validate_template = models.ForeignKey(
+        "AudioTemplate", null=True, blank=True, on_delete=models.SET_NULL, related_name="single_calls_validate"
+    )
+    goodbye_template = models.ForeignKey(
+        "AudioTemplate", null=True, blank=True, on_delete=models.SET_NULL, related_name="single_calls_goodbye"
+    )
+    onhold_template = models.ForeignKey(
+        "AudioTemplate", null=True, blank=True, on_delete=models.SET_NULL, related_name="single_calls_onhold"
+    )
+    tts_script_template = models.ForeignKey(
+        "TtsScriptTemplate", null=True, blank=True, on_delete=models.SET_NULL, related_name="single_calls"
+    )
+
+    # Script overrides for each stage (directly usable if mode is tts_script)
+    greeting_script = models.TextField(blank=True, default="")
+    press1_script = models.TextField(blank=True, default="")
+    press2_script = models.TextField(blank=True, default="")
+    reprompt_script = models.TextField(blank=True, default="")
+    timeout_script = models.TextField(blank=True, default="")
+    validate_script = models.TextField(blank=True, default="")
+    goodbye_script = models.TextField(blank=True, default="")
+    onhold_script = models.TextField(blank=True, default="")
+
     audio_file = models.FileField(upload_to='single_call_audio/', null=True, blank=True)
     audio_file_reprompt = models.FileField(upload_to='single_call_audio/', null=True, blank=True)
     audio_file_timeout = models.FileField(upload_to='single_call_audio/', null=True, blank=True)
@@ -73,11 +89,9 @@ class SingleCall(models.Model):
         ordering = ['-created_at']
 
     def save(self, *args, **kwargs):
-        if self.selected_template:
-            # Sync mode and expected_digits from template if not manually overridden
-            # (In the new simplified UI, they are always inherited)
-            self.mode = self.selected_template.mode
-            self.expected_digits = self.selected_template.expected_digits
+        if self.greeting_template:
+            self.mode = self.greeting_template.mode
+            self.expected_digits = self.greeting_template.expected_digits
         super().save(*args, **kwargs)
 
     def __str__(self):
@@ -162,6 +176,12 @@ class QuestionCategory(models.Model):
     CATEGORY_TYPES = [
         ("greeting", "Main Greeting"),
         ("press1", "Press 1 Prompt (Digit Entry)"),
+        ("press2", "Press 2 Prompt (Transfer)"),
+        ("reprompt", "Reprompt (Invalid Input)"),
+        ("timeout", "Timeout (No Input)"),
+        ("validate", "Validate (Processing)"),
+        ("goodbye", "Goodbye (End)"),
+        ("onhold", "On Hold (Music/Wait)"),
     ]
 
     name = models.CharField(max_length=100, unique=True)
@@ -226,6 +246,13 @@ class TtsScriptTemplate(models.Model):
     name = models.CharField(max_length=150, unique=True)
     greeting_script = models.TextField()
     press1_script = models.TextField(blank=True, default="")
+    press2_script = models.TextField(blank=True, default="")
+    reprompt_script = models.TextField(blank=True, default="")
+    timeout_script = models.TextField(blank=True, default="")
+    validate_script = models.TextField(blank=True, default="")
+    goodbye_script = models.TextField(blank=True, default="")
+    onhold_audio = models.FileField(upload_to="tts_onhold/", null=True, blank=True)
+    expected_digits = models.PositiveIntegerField(default=4)
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

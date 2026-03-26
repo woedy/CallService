@@ -236,7 +236,11 @@ def place_single_call_task(call_id):
     from .models import SingleCall, AudioTemplate
 
     try:
-        call = SingleCall.objects.select_related("selected_template", "press1_template").get(id=call_id)
+        call = SingleCall.objects.select_related(
+            "greeting_template", "press1_template", "press2_template",
+            "reprompt_template", "timeout_template", "validate_template",
+            "goodbye_template", "onhold_template", "tts_script_template"
+        ).get(id=call_id)
     except SingleCall.DoesNotExist:
         return
 
@@ -250,78 +254,75 @@ def place_single_call_task(call_id):
     else:
         channel = f"PJSIP/my-trunk/sip:{call.phone}@my-trunk"
 
-    # Priority 1: Use the template if selected
-    tpl = call.selected_template
-    
-    # Determine effectively active mode
-    mode = tpl.mode if tpl else (call.mode or "audio_only")
-    
-    # Determine dialplan context
-    # If it's a template/script mode, we use single-call-audio as it handles TTS logic
-    # If no audio is provided and it's audio_only, it might be an agent-only call
+    # Dialplan context
+    # If no audio is provided for greeting and it's audio_only, it might be an agent-only call
     context = "single-call-audio"
-    if mode == "audio_only" and not (tpl and tpl.greeting_audio) and not call.audio_file:
+    if call.mode == "audio_only" and not call.greeting_template and not call.audio_file:
         context = "single-call-agent"
 
-    cid_name = call.caller_id if call.caller_id else "CallService"
     expected_digits = max(0, min(int(call.expected_digits or 4), 10))
     tts_enabled = getattr(settings, "TTS_ENABLED", True)
     
-    greeting_mode = "single"
-    dynamic_intro_sound = None
-    dynamic_greeting_sound = None
-    dynamic_outro_sound = None
-    dynamic_press1_sound = None
+    # Helper to resolve sound for a stage
+    def resolve_sound(stage_pref, tpl, script_override, manual_file, default_key):
+        # Apply placeholders to any script
+        def clean_script(text):
+            if not text: return None
+            t = text.replace("{recipient_name}", call.recipient_name or "there")
+            t = t.replace("{caller_id}", call.caller_id or "the service")
+            return t
 
-    # Resolve Greeting Mode and Sounds
-    if tts_enabled and mode == "tts_script":
-        # Full Custom Script
-        raw_script = tpl.greeting_script if tpl else call.tts_script
-        final_script = raw_script.replace("{recipient_name}", call.recipient_name or "there")
-        final_script = final_script.replace("{caller_id}", call.caller_id or "the service")
+        # 1. Manual Script Override
+        if tts_enabled and call.mode == "tts_script" and script_override:
+            s = _synthesize_tts_sound(clean_script(script_override), stage_pref)
+            if s: return s
         
-        # Determine if we should wait for digits or just play back
-        # If expected_digits is 0, we still use playback mode to just play and hang up
-        greeting_mode = "single" if expected_digits > 0 else "playback"
-        dynamic_greeting_sound = _synthesize_tts_sound(final_script, "greeting")
-        logger.info(f"TTS Script Mode: greeting_mode={greeting_mode}, dynamic_greeting_sound={dynamic_greeting_sound}")
-        
-        dynamic_intro_sound = None
-        dynamic_outro_sound = None
+        # 2. Template Script
+        if tts_enabled and call.mode == "tts_script" and tpl and tpl.greeting_script:
+            s = _synthesize_tts_sound(clean_script(tpl.greeting_script), stage_pref)
+            if s: return s
+            
+        # 3. TTS Script Template (New)
+        if tts_enabled and call.mode == "tts_script" and call.tts_script_template:
+            if stage_pref == "onhold" and call.tts_script_template.onhold_audio:
+                return _asterisk_sound(call.tts_script_template.onhold_audio, "")
+            script = getattr(call.tts_script_template, f"{stage_pref}_script", None)
+            if script:
+                s = _synthesize_tts_sound(clean_script(script), stage_pref)
+                if s: return s
 
-    # Determine Press 1 instructions if we expect digits
-    # This now runs for ALL modes (audio_only, etc.)
-    if expected_digits > 0:
-        # Check if we have a press1_template selected
-        if call.press1_template and call.press1_template.greeting_audio:
-            dynamic_press1_sound = _asterisk_sound(call.press1_template.greeting_audio, "")
-        else:
-            press1_text = f"Enter your {expected_digits} digit answer and press the pound key when done."
-            dynamic_press1_sound = _synthesize_tts_sound(press1_text, "press1")
+        # 4. Manual File Override
+        if manual_file:
+            return _asterisk_sound(manual_file, "")
+            
+        # 5. Template File
+        if tpl and tpl.greeting_audio:
+            return _asterisk_sound(tpl.greeting_audio, "")
+            
+        # 6. Default
+        return DEFAULT_CUSTOM_AUDIO[default_key]
 
-    # Final variable assembly
-    # Order of priority for constants: SingleCall override -> Global Default (Template fields removed as constants)
-    def _res(call_field, def_key):
-        if call_field: return _asterisk_sound(call_field, "")
-        return DEFAULT_CUSTOM_AUDIO[def_key]
-
+    # Resolve all sounds
     variables = {
         "SINGLE_CALL_ID": str(call.id),
-        "GREETING_MODE": greeting_mode,
         "EXPECTED_DIGITS": str(expected_digits),
-        "AUDIO_GREETING": dynamic_greeting_sound or (_res(call.audio_file, "greeting") if not tpl else _asterisk_sound(tpl.greeting_audio, "")),
-        "AUDIO_GREETING_INTRO": dynamic_intro_sound or "",
-        "AUDIO_GREETING_TTS": dynamic_greeting_sound or "",
-        "AUDIO_GREETING_OUTRO": dynamic_outro_sound or "",
-        "AUDIO_REPROMPT": _res(call.audio_file_reprompt, "reprompt"),
-        "AUDIO_TIMEOUT": _res(call.audio_file_timeout, "timeout"),
-        "AUDIO_GOODBYE": _res(call.audio_file_goodbye, "goodbye"),
-        "AUDIO_VALIDATE": _res(call.audio_file_validate, "validate"),
-        "AUDIO_PRESS1": dynamic_press1_sound or _res(call.audio_file_press1, "press1"),
-        "AUDIO_PRESS2": _res(call.audio_file_press2, "press2"),
-        "AUDIO_ONHOLD": _res(call.audio_file_onhold, "onhold"),
+        "GREETING_MODE": "single" if (expected_digits > 0 or call.mode == "audio_only") else "playback",
+        
+        "AUDIO_GREETING": resolve_sound("greeting", call.greeting_template, call.greeting_script, call.audio_file, "greeting"),
+        "AUDIO_PRESS1": resolve_sound("press1", call.press1_template, call.press1_script, call.audio_file_press1, "press1"),
+        "AUDIO_PRESS2": resolve_sound("press2", call.press2_template, call.press2_script, call.audio_file_press2, "press2"),
+        "AUDIO_REPROMPT": resolve_sound("reprompt", call.reprompt_template, call.reprompt_script, call.audio_file_reprompt, "reprompt"),
+        "AUDIO_TIMEOUT": resolve_sound("timeout", call.timeout_template, call.timeout_script, call.audio_file_timeout, "timeout"),
+        "AUDIO_VALIDATE": resolve_sound("validate", call.validate_template, call.validate_script, call.audio_file_validate, "validate"),
+        "AUDIO_GOODBYE": resolve_sound("goodbye", call.goodbye_template, call.goodbye_script, call.audio_file_goodbye, "goodbye"),
+        "AUDIO_ONHOLD": resolve_sound("onhold", call.onhold_template, call.onhold_script, call.audio_file_onhold, "onhold"),
     }
-    
+
+    # Backward compatibility for split mode if needed (though we simplified it here)
+    variables["AUDIO_GREETING_INTRO"] = ""
+    variables["AUDIO_GREETING_TTS"] = variables["AUDIO_GREETING"]
+    variables["AUDIO_GREETING_OUTRO"] = ""
+
     logger.info(f"Asterisk Variables for Call {call.id}: {variables}")
 
     import redis
@@ -331,7 +332,7 @@ def place_single_call_task(call_id):
     payload = {
         "action": "originate",
         "channel": channel,
-        "caller_id": f"{cid_name} <{call.phone}>",
+        "caller_id": f"{call.caller_id or 'CallService'} <{call.phone}>",
         "context": context,
         "exten": "s",
         "priority": 1,

@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Campaign, Contact, CallLog, SingleCall, SingleCallLog, QuestionCategory, AudioTemplate
+from .models import Campaign, Contact, CallLog, SingleCall, SingleCallLog, QuestionCategory, AudioTemplate, TtsScriptTemplate
 
 
 class CampaignSerializer(serializers.ModelSerializer):
@@ -75,3 +75,19 @@ class AudioTemplateSerializer(serializers.ModelSerializer):
         return field.url
 
     def get_greeting_audio_url(self, obj): return self._get_url(obj, "greeting_audio")
+
+
+class TtsScriptTemplateSerializer(serializers.ModelSerializer):
+    onhold_audio_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = TtsScriptTemplate
+        fields = '__all__'
+
+    def get_onhold_audio_url(self, obj):
+        if not obj.onhold_audio:
+            return None
+        request = self.context.get("request")
+        if request:
+            return request.build_absolute_uri(obj.onhold_audio.url)
+        return obj.onhold_audio.url
