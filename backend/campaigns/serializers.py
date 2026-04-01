@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Campaign, Contact, CallLog, SingleCall, SingleCallLog
+from .models import Campaign, Contact, CallLog, SingleCall, SingleCallLog, QuestionCategory, AudioTemplate, TtsScriptTemplate
 
 
 class CampaignSerializer(serializers.ModelSerializer):
@@ -34,3 +34,60 @@ class SingleCallSerializer(serializers.ModelSerializer):
         model = SingleCall
         fields = '__all__'
         read_only_fields = ('status', 'dtmf_responses', 'duration_seconds', 'created_at', 'updated_at')
+
+
+class QuestionCategorySerializer(serializers.ModelSerializer):
+    template_count = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = QuestionCategory
+        fields = ["id", "name", "mode", "category_type", "description", "is_active", "template_count", "created_at"]
+
+
+class AudioTemplateSerializer(serializers.ModelSerializer):
+    greeting_audio_url = serializers.SerializerMethodField()
+    category_name = serializers.CharField(source="category.name", read_only=True)
+
+    class Meta:
+        model = AudioTemplate
+        fields = (
+            "id",
+            "category",
+            "category_name",
+            "name",
+            "mode",
+            "greeting_script",
+            "greeting_audio",
+            "greeting_audio_url",
+            "expected_digits",
+            "is_active",
+            "created_at",
+            "updated_at",
+        )
+
+    def _get_url(self, obj, field_name):
+        field = getattr(obj, field_name)
+        if not field:
+            return None
+        request = self.context.get("request")
+        if request:
+            return request.build_absolute_uri(field.url)
+        return field.url
+
+    def get_greeting_audio_url(self, obj): return self._get_url(obj, "greeting_audio")
+
+
+class TtsScriptTemplateSerializer(serializers.ModelSerializer):
+    onhold_audio_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = TtsScriptTemplate
+        fields = '__all__'
+
+    def get_onhold_audio_url(self, obj):
+        if not obj.onhold_audio:
+            return None
+        request = self.context.get("request")
+        if request:
+            return request.build_absolute_uri(obj.onhold_audio.url)
+        return obj.onhold_audio.url

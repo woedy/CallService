@@ -2,21 +2,36 @@ import csv
 import re
 import io
 import json
+import hashlib
 import logging
 import redis
 from django.conf import settings
+from django.db.models import Count
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.permissions import AllowAny
-from .models import Campaign, Contact, CallLog, SingleCall, SingleCallLog
+from rest_framework.pagination import PageNumberPagination
+from .models import (
+    Campaign,
+    Contact,
+    CallLog,
+    SingleCall,
+    SingleCallLog,
+    ProcessedWebhookEvent,
+    QuestionCategory,
+    AudioTemplate,
+    TtsScriptTemplate,
+)
 from .serializers import (
     CampaignSerializer, ContactSerializer, CallLogSerializer,
     SingleCallSerializer, SingleCallLogSerializer,
+    QuestionCategorySerializer, AudioTemplateSerializer,
+    TtsScriptTemplateSerializer,
 )
-from .tasks import start_campaign_task, place_single_call_task, _push_ws_update, _log_and_push
+from .tasks import start_campaign_task, place_single_call_task, _push_ws_update, _log_and_push, _synthesize_tts_sound
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +47,31 @@ DIAL_STATUS_MAP = {
 
 def _is_valid_phone(phone: str) -> bool:
     """Basic phone validation: must be digits (with optional +, -, parens, spaces) and 3-15 digits."""
-    cleaned = re.sub(r'[\s\-\(\)\+]', '', phone)
+    cleaned = _normalize_phone(phone)
     return cleaned.isdigit() and 3 <= len(cleaned) <= 15
+
+
+def _normalize_phone(phone: str) -> str:
+    """Normalize phone to digits-only form for consistent dedupe and dialing."""
+    return re.sub(r"\D", "", phone or "")
+
+
+def _event_idempotency_key(data: dict) -> str:
+    """Build a deterministic event fingerprint to avoid duplicate processing."""
+    key_payload = {
+        "event": data.get("Event", ""),
+        "single_call_id": data.get("SingleCallId", ""),
+        "contact_id": data.get("ContactId", ""),
+        "campaign_id": data.get("CampaignId", ""),
+        "channel": data.get("Channel", ""),
+        "digit": data.get("Digit", ""),
+        "dial_status": data.get("DialStatus", ""),
+        "cause": data.get("Cause", ""),
+        "cause_txt": data.get("CauseTxt", ""),
+        "duration": data.get("Duration", ""),
+    }
+    stable = json.dumps(key_payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(stable.encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -53,17 +91,30 @@ class CampaignViewSet(viewsets.ModelViewSet):
         reader = csv.reader(io.StringIO(file.read().decode("utf-8")))
         contacts = []
         skipped = 0
+        duplicates = 0
+        existing = set(campaign.contacts.values_list("phone", flat=True))
         for row in reader:
             if not row or not row[0].strip():
                 continue
-            phone = row[0].strip()
+            phone = _normalize_phone(row[0].strip())
             if _is_valid_phone(phone):
+                if phone in existing:
+                    duplicates += 1
+                    continue
                 contacts.append(Contact(campaign=campaign, phone=phone))
+                existing.add(phone)
             else:
                 skipped += 1
                 logger.warning(f"Skipping invalid phone number: {phone}")
         Contact.objects.bulk_create(contacts)
-        return Response({"status": "Contacts uploaded", "count": len(contacts), "skipped": skipped})
+        return Response(
+            {
+                "status": "Contacts uploaded",
+                "count": len(contacts),
+                "skipped": skipped,
+                "duplicates": duplicates,
+            }
+        )
 
     def create(self, request, *args, **kwargs):
         name = request.data.get('name')
@@ -162,6 +213,35 @@ class SingleCallViewSet(viewsets.ModelViewSet):
     serializer_class = SingleCallSerializer
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
+    def create(self, request, *args, **kwargs):
+        phone = _normalize_phone(request.data.get("phone", ""))
+        if not _is_valid_phone(phone):
+            return Response({"error": "Invalid phone number"}, status=status.HTTP_400_BAD_REQUEST)
+
+        expected_digits = request.data.get("expected_digits", 4)
+        try:
+            expected_digits = int(expected_digits)
+        except (TypeError, ValueError):
+            return Response({"error": "expected_digits must be an integer"}, status=status.HTTP_400_BAD_REQUEST)
+        if expected_digits < 1 or expected_digits > 10:
+            return Response({"error": "expected_digits must be between 1 and 10"}, status=status.HTTP_400_BAD_REQUEST)
+
+        mode = request.data.get("mode", "audio_only")
+        if mode not in {"audio_only", "tts_script"}:
+            return Response({"error": "Invalid mode"}, status=status.HTTP_400_BAD_REQUEST)
+        # Note: We no longer strictly require greeting_script if other scripts might be provided,
+        # but for backward compatibility with the UI, we check if at least one script/template is set in tts mode.
+
+        mutable_data = request.data.copy()
+        mutable_data["phone"] = phone
+        mutable_data["expected_digits"] = expected_digits
+        mutable_data["mode"] = mode
+        serializer = self.get_serializer(data=mutable_data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+        headers = self.get_success_headers(serializer.data)
+        return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+
     @action(detail=True, methods=["post"])
     def dial(self, request, pk=None):
         call = self.get_object()
@@ -170,7 +250,7 @@ class SingleCallViewSet(viewsets.ModelViewSet):
         # Reset for redial
         call.status = "idle"
         call.dtmf_responses = ""
-        call.duration_seconds = None
+        call.duration_seconds = 0
         call.save()
         place_single_call_task.delay(call.id)
         return Response({"status": "Dialing initiated"}) # Changed message
@@ -185,7 +265,13 @@ class SingleCallViewSet(viewsets.ModelViewSet):
     def reprompt(self, request, pk=None):
         call = self.get_object()
 
-        context = "single-call-audio" if call.audio_file else "single-call-agent"
+        # Determine context: if it was an agent call vs audio call
+        context = "single-call-audio"
+        if call.mode == "audio_only" and not call.greeting_template and not call.audio_file:
+            context = "single-call-agent"
+
+        call.dtmf_responses = ""
+        call.save(update_fields=["dtmf_responses", "updated_at"])
         
         # Publish redirect command to Redis
         r = redis.from_url(settings.REDIS_URL, decode_responses=True)
@@ -206,8 +292,10 @@ class SingleCallViewSet(viewsets.ModelViewSet):
     def connect_agent(self, request, pk=None):
         call = self.get_object()
 
-        context = "single-call-audio" if call.audio_file else "single-call-agent"
-        
+        context = "single-call-audio"
+        if call.mode == "audio_only" and not call.greeting_template and not call.audio_file:
+            context = "single-call-agent"
+
         # Publish redirect command to Redis to connect to agent
         r = redis.from_url(settings.REDIS_URL, decode_responses=True)
         payload = {
@@ -227,8 +315,9 @@ class SingleCallViewSet(viewsets.ModelViewSet):
     def hangup(self, request, pk=None):
         call = self.get_object()
         
-        # Determine appropriate dialplan context
-        context = "single-call-audio" if call.audio_file else "single-call-agent"
+        context = "single-call-audio"
+        if call.mode == "audio_only" and not call.greeting_template and not call.audio_file:
+            context = "single-call-agent"
         
         r = redis.from_url(settings.REDIS_URL, decode_responses=True)
         # If call hasn't answered yet, physically drop the line
@@ -253,6 +342,81 @@ class SingleCallViewSet(viewsets.ModelViewSet):
         _log_and_push(call, "Admin requested to end the call")
         return Response({"status": "Hangup requested"})
 
+
+class TemplatePagination(PageNumberPagination):
+    page_size = 10
+    page_size_query_param = "page_size"
+    max_page_size = 50
+
+
+class QuestionCategoryViewSet(viewsets.ModelViewSet):
+    serializer_class = QuestionCategorySerializer
+    pagination_class = TemplatePagination
+
+    def get_queryset(self):
+        qs = QuestionCategory.objects.annotate(template_count=Count("templates")).order_by("name")
+        mode = self.request.query_params.get("mode")
+        category_type = self.request.query_params.get("category_type")
+        if mode:
+            qs = qs.filter(mode=mode)
+        if category_type:
+            qs = qs.filter(category_type=category_type)
+        return qs
+
+
+class AudioTemplateViewSet(viewsets.ModelViewSet):
+    serializer_class = AudioTemplateSerializer
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+    pagination_class = TemplatePagination
+
+    def get_queryset(self):
+        qs = AudioTemplate.objects.select_related("category").order_by("-created_at")
+        category_id = self.request.query_params.get("category")
+        category_type = self.request.query_params.get("category_type")
+        mode = self.request.query_params.get("mode")
+        search = self.request.query_params.get("search")
+        if category_id:
+            qs = qs.filter(category_id=category_id)
+        if category_type:
+            qs = qs.filter(category__category_type=category_type)
+        if mode:
+            qs = qs.filter(mode=mode)
+        if search:
+            qs = qs.filter(name__icontains=search)
+        return qs
+
+
+class TtsScriptTemplateViewSet(viewsets.ModelViewSet):
+    queryset = TtsScriptTemplate.objects.all().order_by("-created_at")
+    serializer_class = TtsScriptTemplateSerializer
+    pagination_class = TemplatePagination
+
+
+class TtsPreviewView(APIView):
+    def post(self, request):
+        script = request.data.get("script", "").strip()
+        if not script:
+            return Response({"error": "No script provided"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Replace placeholders for preview
+        recipient_name = request.data.get("recipient_name", "John Doe")
+        caller_id = request.data.get("caller_id", "CallService")
+        
+        preview_text = script.replace("{recipient_name}", recipient_name)
+        preview_text = preview_text.replace("{caller_id}", caller_id)
+        
+        # Generate the sound (reuse if possible)
+        sound_path = _synthesize_tts_sound(preview_text, "preview")
+        if not sound_path:
+            return Response({"error": "Synthesis failed"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            
+        # sound_path is "custom/tts_prompts/filename"
+        # We need to return the URL: /media/tts_prompts/filename.wav
+        filename = sound_path.replace("custom/tts_prompts/", "")
+        url = request.build_absolute_uri(f"{settings.MEDIA_URL}tts_prompts/{filename}.wav")
+        
+        return Response({"url": url})
+
 # ---------------------------------------------------------------------------
 # Webhook — receives events from ami_listener
 # ---------------------------------------------------------------------------
@@ -271,6 +435,15 @@ class CallEventWebhook(APIView):
         event_type = data.get("Event")
         contact_id = data.get("ContactId")
         single_call_id = data.get("SingleCallId")
+
+        # Idempotency guard for known contact/single-call events
+        idempotent_events = {"Ringing", "Answered", "Hangup"}
+        if event_type in idempotent_events and (contact_id or single_call_id):
+            event_key = _event_idempotency_key(data)
+            _, created = ProcessedWebhookEvent.objects.get_or_create(event_key=event_key)
+            if not created:
+                logger.info("Webhook: duplicate event ignored")
+                return Response({"status": "received"})
 
         # --- Single call event ---
         if single_call_id:
@@ -296,7 +469,7 @@ class CallEventWebhook(APIView):
 
             elif event_type == "DTMFReceived":
                 digit = data.get("Digit", "")
-                call.dtmf_responses += digit
+                call.dtmf_responses = digit
                 call.save()
                 _log_and_push(call, f"DTMF digit received: {digit}", data)
 
